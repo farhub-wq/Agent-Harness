@@ -1,0 +1,9 @@
+# 由 nginx 镜像的入口脚本 20-envsubst-on-templates.sh 从环境变量生成
+# /etc/nginx/conf.d/internal_token.conf，不要手工编辑本文件以外的生成物。
+#
+# 值为空 = 注入空头（等价于不启用这道校验，与 backend 未配
+# INTERNAL_AUTH_TOKEN 时的行为一致）。两边必须同时配或同时不配。
+#
+# 这是给 backend 的"共享密钥"：只有 nginx 和后端进程知道它，所以沙箱里模型
+# 生成的代码即使能连到 backend 也伪造不出 X-Authenticated-User。
+set $internal_token "${INTERNAL_AUTH_TOKEN}";

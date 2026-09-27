@@ -284,10 +284,11 @@ def generate_chart(
         sandbox.write_file(script_path, CHART_SCRIPT)
 
         # 安装依赖（仅首次，后续复用缓存）
-        sandbox.execute("pip install -q matplotlib numpy 2>/dev/null || true", timeout=60)
+        # 冷装 matplotlib+numpy 实测要 1 分钟以上（PIP_TARGET 指向 volume，首装无缓存）
+        sandbox.execute("pip install -q matplotlib numpy 2>/dev/null || true", timeout=300)
 
         # 在沙箱内执行图表生成
-        result = sandbox.execute(f"python {script_path} {params_path}", timeout=30)
+        result = sandbox.execute(f"python {script_path} {params_path}", timeout=120)
 
         # 清理临时文件
         sandbox.execute(f"rm -f {params_path} {script_path} 2>/dev/null || true")

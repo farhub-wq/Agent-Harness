@@ -191,7 +191,7 @@ class UserSkillsRestoreMiddleware(AgentMiddleware):
                     "python3 -m pip install --no-cache-dir "
                     "--target /workspace/python-packages "
                     f"-r '{requirement_path}' -q",
-                    timeout=120,
+                    timeout=300,
                 )
                 if result.exit_code == 0:
                     middleware_logger.info(

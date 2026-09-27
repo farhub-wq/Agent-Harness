@@ -19,7 +19,7 @@
 
 ## 本机目录
 
-新版：`/home/administrator/projects/ERP-AGENT-open-source`
+新版：`/home/administrator/projects/Agent-Harness`
 
 旧版：`/home/administrator/projects/ERP-AGENT`，未覆盖，原有未提交改动保留。
 
@@ -40,21 +40,21 @@
 终端 1：MCP 服务
 
 ```bash
-cd ~/projects/ERP-AGENT-open-source
+cd ~/projects/Agent-Harness
 .venv/bin/python -m src.mcp_server.server_main
 ```
 
 终端 2：后端（先确认 MCP 已启动）
 
 ```bash
-cd ~/projects/ERP-AGENT-open-source
+cd ~/projects/Agent-Harness
 .venv/bin/python -m src.api_view.web_main
 ```
 
 终端 3：前端
 
 ```bash
-cd ~/projects/ERP-AGENT-open-source/frontend
+cd ~/projects/Agent-Harness/frontend
 source ~/.nvm/nvm.sh
 nvm use 22
 npm run dev
@@ -67,7 +67,7 @@ npm run dev
 先执行离线测试：
 
 ```bash
-cd ~/projects/ERP-AGENT-open-source
+cd ~/projects/Agent-Harness
 .venv/bin/python -m src.test.test_memory_layer
 .venv/bin/python -m unittest src.test.test_memory_integration -v
 ```

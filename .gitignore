@@ -33,6 +33,16 @@ next-env.d.ts
 # ============ 生成文件 / 下载目录 ============
 src/download/
 
+# ============ 认证凭据 ============
+# nginx Basic Auth 的密码哈希
+deploy/nginx/htpasswd
+# nginx ↔ backend 共享密钥。deploy/set_internal_token.sh 会把真实值同时写进
+# 这里和 deploy/.env，所以不能入库 —— 仓库里只留 deploy/nginx.env.example 模板。
+deploy/nginx.env
+
+# ============ 临时脚本 ============
+/tmp/
+
 # ============ 日志 ============
 *.log
 

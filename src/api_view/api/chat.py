@@ -13,11 +13,12 @@ import uuid
 from typing import AsyncGenerator
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from langgraph.types import Command
 
 from ..agent_loader import agent_loader
+from ..auth import assert_thread_owner, current_user_id, resolve_user_id
 from ...agent.schema import ChatRequest, ResumeRequest
 from ...agent.log_utils import web_logger
 
@@ -362,24 +363,44 @@ async def stream_chat_response(
 
 
 @router.post("/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(
+    request: ChatRequest,
+    authenticated: str | None = Depends(current_user_id),
+):
     """SSE 流式对话端点"""
     await agent_loader.initialize()
 
+    # 认证身份优先；request.user_id 只在 AUTH_MODE=none 时生效。
+    user_id = resolve_user_id(authenticated, request.user_id)
+
     thread_id = request.thread_id or agent_loader.generate_thread_id()
     existing_owner = await agent_loader.get_conversation_user_id(thread_id)
-    if existing_owner and existing_owner != request.user_id:
+    if existing_owner and existing_owner != user_id:
         raise HTTPException(status_code=403, detail="该会话不属于当前用户")
+    if existing_owner is None:
+        # 归属记录为空时不能再像以前那样直接放行。这里是唯一允许"认领"新
+        # thread 的端点（其余四个 resume / state / history / delete 都走
+        # assert_thread_owner，owner 为空一律 403），所以漏在这里等于给出一条
+        # 认领通道：会话记录与展示消息是两张表，删除会话或某一侧写入失败都会
+        # 留下「有消息但没有归属」的孤儿 thread，任何知道该 thread_id 的人 POST
+        # 一次就能把归属改成自己，并让 checkpoint 里上一位用户的历史进入自己的
+        # 上下文。全新 thread 不会有展示消息，据此区分。
+        if await agent_loader.get_display_messages(thread_id):
+            web_logger.warning(
+                f"Denied claiming orphaned thread {thread_id}: messages exist but "
+                f"no conversation owner record (requester={user_id!r})"
+            )
+            raise HTTPException(status_code=403, detail="该会话不属于当前用户")
 
     # 在流开始时就记录归属，确保在中断后 resume 能找到同一个用户沙箱。
     title = request.message[:20] + "..." if len(request.message) > 20 else request.message
-    await agent_loader.save_conversation(thread_id, request.user_id, title)
+    await agent_loader.save_conversation(thread_id, user_id, title)
 
     return StreamingResponse(
         stream_chat_response(
             message=request.message,
             thread_id=thread_id,
-            user_id=request.user_id,
+            user_id=user_id,
             username=request.username,
         ),
         media_type="text/event-stream",
@@ -393,10 +414,16 @@ async def chat_stream(request: ChatRequest):
 
 
 @router.post("/{thread_id}/resume")
-async def chat_resume(thread_id: str, request: ResumeRequest):
+async def chat_resume(
+    thread_id: str,
+    request: ResumeRequest,
+    authenticated: str | None = Depends(current_user_id),
+):
     """中断恢复端点"""
     await agent_loader.initialize()
-    user_id = await agent_loader.get_conversation_user_id(thread_id) or "default_user"
+    owner = await agent_loader.get_conversation_user_id(thread_id)
+    assert_thread_owner(thread_id, owner, authenticated)
+    user_id = authenticated or owner or "default_user"
 
     return StreamingResponse(
         stream_chat_response(
@@ -416,10 +443,15 @@ async def chat_resume(thread_id: str, request: ResumeRequest):
 
 
 @router.get("/{thread_id}/state")
-async def chat_state(thread_id: str):
+async def chat_state(
+    thread_id: str,
+    authenticated: str | None = Depends(current_user_id),
+):
     """获取 Agent 状态（是否处于中断中）"""
     await agent_loader.initialize()
-    user_id = await agent_loader.get_conversation_user_id(thread_id) or "default_user"
+    owner = await agent_loader.get_conversation_user_id(thread_id)
+    assert_thread_owner(thread_id, owner, authenticated)
+    user_id = authenticated or owner or "default_user"
     session = await agent_loader.get_session(user_id)
     config = agent_loader.create_config(thread_id, user_id)
     try:
@@ -431,7 +463,12 @@ async def chat_state(thread_id: str):
 
 
 @router.get("/{thread_id}/history")
-async def chat_history(thread_id: str):
+async def chat_history(
+    thread_id: str,
+    authenticated: str | None = Depends(current_user_id),
+):
     """获取对话消息历史"""
+    owner = await agent_loader.get_conversation_user_id(thread_id)
+    assert_thread_owner(thread_id, owner, authenticated)
     messages = await agent_loader.get_display_messages(thread_id)
     return {"thread_id": thread_id, "messages": messages}

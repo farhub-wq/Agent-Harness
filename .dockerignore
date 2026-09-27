@@ -1,0 +1,31 @@
+# ============ 绝不进镜像 ============
+.env
+.env.*
+!.env.example
+
+# 认证凭据（nginx Basic Auth 密码哈希）。镜像只 COPY src/，本目录本来就
+# 进不去，这里是防止将来有人改成 COPY . 时的兜底。
+deploy/nginx/htpasswd
+
+# ============ Python ============
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ============ 非构建所需 ============
+.git/
+.gitignore
+frontend/
+tmp/
+*.log
+
+# 生成物（会在容器内由卷提供）
+src/download/
+
+# ============ 文档 ============
+README.md
+WSL_START.md

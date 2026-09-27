@@ -17,6 +17,7 @@ from deepagents.backends.sandbox import (
 from langchain_core.messages import HumanMessage
 
 from src.agent.backends.sandbox_holder import (
+    DEFAULT_USER_ID,
     bind_sandbox,
     get_sandbox,
     reset_sandbox,
@@ -256,6 +257,27 @@ class IsolationTests(unittest.TestCase):
             self.assertIs(get_sandbox(), bob)
         finally:
             reset_sandbox(bob_token)
+
+    def test_request_bound_to_none_does_not_fall_back_to_default_user(self):
+        """请求内绑定为 None 时必须如实返回 None。
+
+        否则 LocalShell 降级用户（main_agent 显式 set_sandbox(None, user_id)）会落到
+        DEFAULT_USER_ID 的注册表条目，把文件写进别人的容器。
+        """
+        ghost = FakeSandbox("default-user-sandbox")
+        set_sandbox(ghost, DEFAULT_USER_ID)
+        try:
+            token = bind_sandbox("user-without-sandbox")
+            try:
+                self.assertIsNone(get_sandbox())
+            finally:
+                reset_sandbox(token)
+
+            # 非请求上下文才允许按用户查注册表
+            self.assertIs(get_sandbox(DEFAULT_USER_ID), ghost)
+        finally:
+            set_sandbox(None, DEFAULT_USER_ID)
+            self.assertIsNone(get_sandbox(DEFAULT_USER_ID))
 
 
 class MongoNamespaceTests(unittest.TestCase):

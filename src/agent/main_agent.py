@@ -20,8 +20,10 @@ from .config import (
     INTERRUPT_ON_TOOLS, skills_store_namespace,
     MAX_MODEL_CALLS, MAX_TOOL_CALLS,
     SANDBOX_HEALTH_CHECK_INTERVAL_SECONDS,
+    ALLOW_LOCAL_SHELL_FALLBACK,
 )
 from .schema import ProcurementContext
+from .backends.sandbox_setup import SANDBOX_TRANSFER_DIR
 from .log_utils import agent_logger
 from .memory.config import DEFAULT_MEMORY_CONFIG
 from .memory.keeper import MemoryKeeper
@@ -43,6 +45,9 @@ def _upload_project_to_sandbox(sandbox) -> bool:
         ".env", ".env.*", "*.pem", "*.key",
         ".eggs", "*.pyc", "*.pyo", ".DS_Store", ".docker",
         "*.png", "*.jpg", "*.jpeg", "*.gif",  # 生成物不传
+        # 生成物/临时目录：整棵树会被打包上传进沙箱一次，
+        # 这里多一个字节就多传一次。
+        "download", "tmp", "*.tar.gz", "*.tar",
     ]
 
     def _should_skip(rel_path: str) -> bool:
@@ -74,7 +79,12 @@ def _upload_project_to_sandbox(sandbox) -> bool:
 
         # 仅使用 BaseSandbox 的公开协议上传；这样 SandboxBackendProxy 热替换
         # 底层容器后，项目上传仍能工作，且不会依赖 Docker 私有 _container。
-        archive_path = "/tmp/erp-agent-project.tar.gz"
+        #
+        # 落地点必须在 volume 上，不能放 /tmp：只读 rootfs 下 daemon 的 archive
+        # 接口拒绝写 tmpfs（500 "container rootfs is marked read-only"），
+        # 详见 SANDBOX_TRANSFER_DIR。解包目标仍是 tmpfs 的 /workspace/src，
+        # 那是 exec 里的 tar 写的，不受这条限制。
+        archive_path = f"{SANDBOX_TRANSFER_DIR}/erp-agent-project.tar.gz"
         responses = sandbox.upload_files([(archive_path, data)])
         errors = [getattr(item, "error", None) for item in responses]
         if not responses or any(errors):
@@ -287,6 +297,15 @@ def create_main_agent(
             f"{sandbox_backend.container_name}"
         )
     except Exception as e:
+        if not ALLOW_LOCAL_SHELL_FALLBACK:
+            # LocalShellBackend 在 backend 进程自身的工作目录里执行模型生成的
+            # 代码 —— 那里有 DEEPSEEK_API_KEY、可写的 skills 挂载和整个 /app。
+            # 容器部署下宁可直接失败，也不要静默把沙箱换成裸进程。
+            agent_logger.error(
+                f"Managed Docker sandbox unavailable ({e}); LocalShell fallback "
+                f"disabled (ALLOW_LOCAL_SHELL_FALLBACK=false)"
+            )
+            raise
         agent_logger.warning(
             f"Managed Docker sandbox unavailable ({e}), falling back to LocalShell"
         )
@@ -355,6 +374,7 @@ def create_main_agent(
     # Harness 阶段状态机 + 评审器（真 Harness 架构核心）
     from .harness import HarnessPhaseMiddleware, load_harness_config
     from .middlewares.review_gate import ReviewExecutionGate, SafeRubricMiddleware
+    from .middlewares.grader_transcript import build_grader_messages
 
     # 读取 Harness DSL 配置中的评审迭代上限
     _harness_config = load_harness_config()
@@ -409,7 +429,14 @@ def create_main_agent(
         # --- Harness 评审器（RubricMiddleware）---
         # 收到 rubric 后，grader 子Agent 结构化产出 satisfied/needs_revision/failed，
         # needs_revision 时自动打回模型重做，形成真实 Review 回路（非 prompt 软约束）
-        SafeRubricMiddleware(model=grader_llm, max_iterations=_review_max_iterations),
+        # prepare_messages_for_grader：grader 只看转录尾部（框架窗口 30 条），
+        # 而一轮任务常有 30+ 次工具调用，不压缩的话带证据的 ERP 查询会被挤出
+        # 窗口，评审判「无工具证据」而永不通过。见 grader_transcript.py。
+        SafeRubricMiddleware(
+            model=grader_llm,
+            max_iterations=_review_max_iterations,
+            prepare_messages_for_grader=build_grader_messages,
+        ),
         ReviewExecutionGate(_harness_config),  # after_agent 逆序：先升级，再审查
         # --- 框架内置中间件（调用限制）---
         ModelCallLimitMiddleware(run_limit=MAX_MODEL_CALLS),          # 模型调用上限

@@ -6,6 +6,7 @@ Docker 沙箱后端
 import docker
 import base64
 import io
+import shlex
 import tarfile
 import json
 from typing import Optional
@@ -15,8 +16,9 @@ from deepagents.backends.sandbox import (
     FileDownloadResponse, FileUploadResponse,
 )
 from deepagents.backends import DEFAULT_EXECUTE_TIMEOUT
+from .docker_client import get_docker_client
 from ..log_utils import sandbox_logger
-from ..config import SANDBOX_WORK_DIR
+from ..config import DOCKER_TIMEOUT_SECONDS, SANDBOX_WORK_DIR
 
 
 class CustomOpenSandbox(BaseSandbox):
@@ -48,7 +50,7 @@ class CustomOpenSandbox(BaseSandbox):
     def _connect(self):
         """连接到 Docker 容器"""
         try:
-            self._client = docker.from_env()
+            self._client = get_docker_client()
             self._container = self._client.containers.get(self._container_name)
             if self._container.status != "running":
                 raise RuntimeError(
@@ -105,7 +107,8 @@ class CustomOpenSandbox(BaseSandbox):
 
         Args:
             command: shell 命令字符串
-            timeout: 超时秒数（None 使用默认值）
+            timeout: 超时秒数（None 使用构造函数的 timeout）
+            timeout<=0 表示不限制
 
         Returns:
             ExecuteResponse(output, exit_code, truncated)
@@ -116,10 +119,41 @@ class CustomOpenSandbox(BaseSandbox):
                 exit_code=-1,
             )
 
+        # Docker SDK 的 exec_start 没有超时参数，所以计时交给容器内的 timeout(1)：
+        # 它默认把子进程放进独立进程组并向整组发 SIGTERM，pip 这类子进程会一起收到。
+        # 镜像里没有 timeout(1) 时退化为不限制（与加这个参数之前的行为一致）。
+        effective_timeout = self._default_timeout if timeout is None else timeout
+
+        # 容器内的 timeout(N) 必须**先于**客户端 socket 超时触发。exec_run 是一次
+        # 同步 HTTP 请求，受 docker.from_env(timeout=DOCKER_TIMEOUT_SECONDS) 约束；
+        # 若 N 大于它，长命令的失败形态就变成 urllib3 ReadTimeout → 被下面
+        # `except Exception` 变成 `[执行错误] ...`，而不是可读的 `[超时]` 提示，
+        # 调用方还可能据此重试，于是容器里并发跑起两份安装。
+        # sandbox_setup 里有 timeout=900 的调用，正是这个形态。
+        ceiling = max(30, DOCKER_TIMEOUT_SECONDS - 30)
+        if effective_timeout and effective_timeout > ceiling:
+            sandbox_logger.warning(
+                f"Clamping execute timeout {int(effective_timeout)}s to {ceiling}s: "
+                f"must stay below the docker client timeout "
+                f"(DOCKER_TIMEOUT_SECONDS={DOCKER_TIMEOUT_SECONDS}) or the socket "
+                f"read times out first and the failure loses its reason"
+            )
+            effective_timeout = ceiling
+
+        inner = f"cd {self._work_dir} && {command}"
+        if effective_timeout and effective_timeout > 0:
+            shell_cmd = (
+                "if command -v timeout >/dev/null 2>&1; then "
+                f"timeout {int(effective_timeout)} bash -c {shlex.quote(inner)}; "
+                f"else {inner}; fi"
+            )
+        else:
+            shell_cmd = inner
+
         try:
             # 在工作目录下执行命令
             exec_result = self._container.exec_run(
-                cmd=["bash", "-c", f"cd {self._work_dir} && {command}"],
+                cmd=["bash", "-c", shell_cmd],
                 demux=True,  # 分离 stdout/stderr
                 workdir=self._work_dir,
             )
@@ -139,6 +173,28 @@ class CustomOpenSandbox(BaseSandbox):
                     output_parts.append(stderr_text)
 
             output = "\n".join(output_parts) if output_parts else ""
+
+            # timeout(1) 用 124 表示"到点被杀"，换成看得懂的提示，
+            # 免得调用方把超时当成命令本身失败。
+            #
+            # 但 124 不专属于我们套的那层 timeout：命令自带 `timeout`（或脚本
+            # 里自己用了）也会以 124 退出。effective_timeout<=0 意味着压根没套
+            # 包装（文档里的"不限制"模式），此时不能报成"超过 0s"。
+            if exit_code == 124:
+                if effective_timeout and effective_timeout > 0:
+                    output = (
+                        f"[超时] 命令超过 {int(effective_timeout)}s 未结束，已被终止。"
+                        f"需要更长时间请显式传 timeout=。\n" + output
+                    )
+                else:
+                    output = (
+                        "[超时] 命令以 124 退出（自带 timeout 触发），"
+                        "本次未限制时长。\n" + output
+                    )
+                sandbox_logger.warning(
+                    f"Docker exec returned 124 (timeout={effective_timeout}): "
+                    f"{command[:120]}"
+                )
 
             # 截断过长输出
             truncated = False
@@ -171,12 +227,52 @@ class CustomOpenSandbox(BaseSandbox):
             raise FileNotFoundError(f"Cannot read file: {path} — {resp.output}")
         return resp.output
 
+    def _read_bytes_raw(self, path: str) -> bytes:
+        """按字节读沙箱内文件，绕开 ``execute()`` 的输出上限。
+
+        `execute()` 会把输出硬截到 100000 字符（见上方 max_bytes），这对"看一眼
+        命令输出"是合理的，但对按字节搬文件是致命的：base64 把文件撑大 4/3，所以
+        **超过约 73KB 的文件读出来必然是一段被截断的 base64** —— `b64decode`
+        默认丢弃非法字母，截断标记里的字母会被并进数据，长度对不齐就抛
+        `binascii.Error: Invalid base64-encoded string`，对得齐则静默解出半截
+        内容。两种都是错的，而且报错方向完全误导：`download_sandbox_file` 会吞掉
+        异常、回退到宿主机路径检查，最后告诉用户"文件不存在于沙箱中"。
+        Agent 生成的图表 PNG 和 HTML 报告普遍超过 73KB。
+
+        这里直接调 `exec_run`，不套那层截断。
+
+        **不能改用 archive 接口**（`get_archive`）：daemon 是按宿主机路径解析的，
+        而 `/workspace` 是 tmpfs、没有对应的宿主路径，实测对该目录下的文件一律
+        404 "Could not find the file"（镜像 rootfs 和 volume 上的路径则正常）。
+        Agent 的产物恰恰都写在 /workspace 下。
+
+        仍然走 base64 而不是 cat：避免文本编码/换行在往返中被改写；`-w0` 不折行。
+        """
+        if self._container is None:
+            raise RuntimeError("沙箱未连接")
+
+        result = self._container.exec_run(
+            cmd=["bash", "-c", f"base64 -w0 {shlex.quote(path)}"],
+            demux=True,
+            workdir=self._work_dir,
+        )
+        stdout, stderr = result.output
+        if result.exit_code != 0:
+            detail = (stderr or b"").decode("utf-8", errors="replace").strip()
+            # 目录要和"不存在"区分开：调用方对两者的处理不同
+            if "Is a directory" in detail:
+                raise IsADirectoryError(f"Not a regular file: {path}")
+            raise FileNotFoundError(f"Cannot read file: {path} — {detail}")
+        return stdout or b""
+
     def read_file_bytes(self, path: str) -> bytes:
-        """读取沙箱内文件内容（二进制，base64 传输）"""
-        resp = self.execute(f"base64 '{path}'")
-        if resp.exit_code != 0:
-            raise FileNotFoundError(f"Cannot read file: {path} — {resp.output}")
-        return base64.b64decode(resp.output.strip())
+        """读取沙箱内文件内容（二进制）"""
+        raw = self._read_bytes_raw(path)
+        try:
+            return base64.b64decode(raw)
+        except Exception as e:
+            # 走到这里说明不是"读不到"而是数据坏了，不能再报成文件不存在
+            raise RuntimeError(f"Corrupt base64 payload for {path}: {e}") from e
 
     def write_file(self, path: str, content: str | bytes) -> str:
         """写入内容到沙箱内文件（自动创建父目录）"""
@@ -318,10 +414,10 @@ class CustomOpenSandbox(BaseSandbox):
 
     def destroy(self):
         """断开连接（不销毁容器，容器由 SandboxManager 管理）"""
+        # 只丢弃容器引用。client 是进程级共享的（见 docker_client），
+        # 在这里 close() 会连带关掉其它用户正在使用的连接池。
         self._container = None
-        if self._client:
-            self._client.close()
-            self._client = None
+        self._client = None
         sandbox_logger.info("Docker sandbox disconnected")
 
     def destroy_container(self):
@@ -329,31 +425,30 @@ class CustomOpenSandbox(BaseSandbox):
         if self._container:
             try:
                 self._container.stop(timeout=5)
-                self._container.remove(force=True)
+                # v=True 连带删掉依赖目录的匿名 volume（见 sandbox_setup），
+                # 否则每回收一个沙箱就漏一个 100MB+ 的 volume。
+                self._container.remove(force=True, v=True)
                 sandbox_logger.info(f"Container destroyed: {self._container_name}")
             except Exception as e:
                 sandbox_logger.warning(f"Error destroying container: {e}")
             finally:
                 self._container = None
-        if self._client:
-            self._client.close()
-            self._client = None
+        # 同上：共享 client 不由单个沙箱负责关闭。
+        self._client = None
 
     # ============================================================
     # 文件上传/下载（tar 流方式，高效可靠）
     # ============================================================
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
-        """从容器中下载文件（base64 传输）"""
+        """从容器中下载文件（不受 execute 输出上限约束）"""
         results = []
         for path in paths:
             try:
-                resp = self.execute(f"base64 '{path}'")
-                if resp.exit_code == 0 and resp.output.strip():
-                    content = base64.b64decode(resp.output.strip())
-                    results.append(FileDownloadResponse(path=path, content=content, error=None))
-                else:
-                    results.append(FileDownloadResponse(path=path, content=None, error="file_not_found"))
+                content = self.read_file_bytes(path)
+                results.append(FileDownloadResponse(path=path, content=content, error=None))
+            except FileNotFoundError:
+                results.append(FileDownloadResponse(path=path, content=None, error="file_not_found"))
             except Exception as e:
                 results.append(FileDownloadResponse(path=path, content=None, error=str(e)))
         return results

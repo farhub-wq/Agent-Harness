@@ -631,7 +631,8 @@ def _install_dependencies(skill_dir: Path):
                 "python3 -m pip install --no-cache-dir "
                 "--target /workspace/python-packages "
                 f"-r '{sandbox_req}' -q",
-                timeout=120,
+                # 用户 Skill 的依赖可能包含编译型包，120s 常常不够
+                timeout=300,
             )
             # 清理沙箱临时文件
             sandbox.execute(f"rm -f {sandbox_req}")

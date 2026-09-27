@@ -21,6 +21,7 @@ from pathlib import Path
 from datetime import datetime
 from langchain_core.tools import tool
 
+from ..config import PUBLIC_BASE_URL
 from ..log_utils import agent_logger
 from ..backends.sandbox_holder import get_sandbox, has_sandbox
 
@@ -238,7 +239,8 @@ def _write_to_sandbox_or_local(filename: str, content: str, title: str, format_n
     file_path = LOCAL_DOWNLOAD_DIR / filename
     file_path.write_text(content, encoding="utf-8")
     file_size = file_path.stat().st_size
-    download_url = f"http://localhost:8000/api/download/{file_path.name}"
+    # 同 download_sandbox_file：这个链接要在用户浏览器里打开，不能是容器内地址。
+    download_url = f"{PUBLIC_BASE_URL.rstrip('/')}/api/download/{file_path.name}"
 
     agent_logger.info(f"Document generated locally: {file_path.name} ({file_size} bytes)")
     return (

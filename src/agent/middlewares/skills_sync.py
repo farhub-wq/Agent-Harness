@@ -130,7 +130,10 @@ class SkillsSyncMiddleware(AgentMiddleware):
         current_files: dict[str, str] = {}  # rel_path → hash
         for file_path in self._skills_dir.rglob("*"):
             if file_path.is_file() and not self._should_skip(file_path):
-                rel_path = str(file_path.relative_to(self._skills_dir))
+                # as_posix：这个相对路径会拼成 /skills/... 发给容器。
+                # Windows 上 str(Path) 给的是 "demo\SKILL.md"，拼出来就是
+                # 容器里不存在的 /skills/demo\SKILL.md（反斜杠是合法文件名字符）。
+                rel_path = file_path.relative_to(self._skills_dir).as_posix()
                 file_hash = self._compute_hash(file_path)
                 current_files[rel_path] = file_hash
 
@@ -221,7 +224,7 @@ class SkillsSyncMiddleware(AgentMiddleware):
         folder_hash = hashlib.md5()
         for file_path in sorted(skill_dir.rglob("*")):
             if file_path.is_file() and not self._should_skip(file_path):
-                rel = str(file_path.relative_to(skill_dir))
+                rel = file_path.relative_to(skill_dir).as_posix()
                 file_hash = self._compute_hash(file_path)
                 folder_hash.update(f"{rel}:{file_hash}".encode())
         return folder_hash.hexdigest()

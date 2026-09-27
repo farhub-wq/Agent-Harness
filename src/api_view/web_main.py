@@ -11,16 +11,24 @@ from contextlib import asynccontextmanager, suppress
 # 确保项目根目录在 path 中
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from .api.chat import router as chat_router
 from .api.history import router as history_router
+from .auth import current_user_id
 from .web_config import close_mongo_client
 from ..agent.log_utils import web_logger
 from ..agent.backends.sandbox_manager import sandbox_manager
-from ..agent.config import SANDBOX_MAINTENANCE_INTERVAL_SECONDS
+from ..agent.config import (
+    AUTH_MODE,
+    AUTH_USER_HEADER,
+    CORS_ALLOW_ORIGINS,
+    INTERNAL_AUTH_HEADER,
+    INTERNAL_AUTH_TOKEN,
+    SANDBOX_MAINTENANCE_INTERVAL_SECONDS,
+)
 
 
 async def _sandbox_maintenance(stop_event: asyncio.Event) -> None:
@@ -48,10 +56,21 @@ async def _sandbox_maintenance(stop_event: asyncio.Event) -> None:
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     web_logger.info("Starting ERP Agent Web Server...")
+    if AUTH_MODE == "proxy" and not INTERNAL_AUTH_TOKEN:
+        web_logger.warning(
+            f"AUTH_MODE=proxy without INTERNAL_AUTH_TOKEN: backend trusts "
+            f"{AUTH_USER_HEADER} from anyone who can reach it. Sandbox code runs "
+            f"inside dind, which shares a Docker network with this container, so it "
+            f"can forge that header and read other users' conversations. Set "
+            f"INTERNAL_AUTH_TOKEN (and inject {INTERNAL_AUTH_HEADER} from nginx) to close it."
+        )
     stop_event = asyncio.Event()
     maintenance_task = None
     try:
-        # 预热失败不阻止 Web 服务启动；首个请求仍会按需创建并回退到 LocalShell。
+        # 先清扫上次进程遗留的孤儿容器，再补预热池。否则重启一次就多留一批
+        # 随机命名的暖容器，它们在内存里没有对应 entry，永远不会被空闲回收。
+        await asyncio.to_thread(sandbox_manager.prune_orphans)
+        # 预热失败不阻止 Web 服务启动；首个请求仍会按需创建。
         await asyncio.to_thread(sandbox_manager.ensure_warm_pool)
         maintenance_task = asyncio.create_task(
             _sandbox_maintenance(stop_event), name="sandbox-maintenance"
@@ -75,11 +94,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS 全开（开发环境）
+# CORS 白名单来自 CORS_ALLOW_ORIGINS。容器部署下前端与后端同源（都在 nginx
+# 后面），跨域不再发生，本项只服务直连后端本地开发的场景。
+# 不用 allow_credentials：本服务不依赖 cookie，而 "*" + credentials 是浏览器
+# 明确拒绝的非法组合。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=CORS_ALLOW_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -90,19 +112,32 @@ app.include_router(history_router)
 
 # 文件下载目录（图表等生成文件）
 DOWNLOAD_DIR = Path(__file__).resolve().parent.parent / "download"
-DOWNLOAD_DIR.mkdir(exist_ok=True)
+# parents=True：容器里 src/download 可能整个目录都不存在（它在 .gitignore 里），
+# 单层 mkdir 会直接崩在 import 期。
+DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+_DOWNLOAD_ROOT = DOWNLOAD_DIR.resolve()
 
 
 @app.get("/api/download/{filename}")
-async def download_file(filename: str):
-    """提供生成文件（图表PNG等）的HTTP下载"""
-    file_path = DOWNLOAD_DIR / filename
-    if not file_path.exists() or not file_path.is_file():
-        from fastapi import HTTPException
+async def download_file(filename: str, _: str | None = Depends(current_user_id)):
+    """提供生成文件（图表PNG等）的HTTP下载
+
+    注意：下载目录是全局共享的，认证只挡住匿名访问，挡不住"另一个已登录用户
+    拿着文件名来取"。文件名是 ``<名称>_<时间戳>.md`` 这类可猜格式。要做严格
+    隔离得让生成工具按 user_id 分目录，那是另一轮改动。
+    """
+    # 路由是单段匹配，但 Starlette 先按原始 path 匹配、之后才做 percent-decode，
+    # 所以 /api/download/..%2F..%2Fetc%2Fpasswd 会匹配上并把 filename 解成
+    # ../../etc/passwd。必须在这里重新限定在下载目录内。
+    file_path = (DOWNLOAD_DIR / filename).resolve()
+    if not file_path.is_relative_to(_DOWNLOAD_ROOT):
+        raise HTTPException(status_code=400, detail="非法文件名")
+    if not file_path.is_file():
         raise HTTPException(status_code=404, detail=f"文件不存在: {filename}")
     return FileResponse(
         path=str(file_path),
-        filename=filename,
+        filename=file_path.name,
         media_type="application/octet-stream",
     )
 
@@ -119,4 +154,6 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # workers 必须为 1：SandboxManager / sandbox_holder / AgentLoader 都是进程内
+    # 单例状态，多 worker 会各自认领同一个暖容器并互相覆盖 MongoDB 里的映射。
+    uvicorn.run(app, host="0.0.0.0", port=8000, workers=1, proxy_headers=True)

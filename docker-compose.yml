@@ -1,0 +1,281 @@
+# ERP-AGENT 容器化部署
+#
+#   cp deploy/.env.example deploy/.env   # 填 DEEPSEEK_API_KEY 和 PUBLIC_BASE_URL
+#   docker compose up -d
+#
+# 注意：所有密钥与可调项都走 deploy/.env（通过 env_file 注入）。compose 文件里
+# 刻意不使用 ${VAR} 插值取密钥 —— 项目根的 .env 是本地开发配置（含 localhost
+# 地址），compose 会自动把它当作插值源，混用会产生歧义。
+#
+# 单副本约束：SandboxManager / sandbox_holder / AgentLoader 全是进程内状态，
+# 不要 --scale backend=N，也不要给 uvicorn 加 workers。详见 README 部署章节。
+
+name: erp-agent
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+
+  # ============================================================
+  # 数据层
+  # ============================================================
+  mongo:
+    image: mongo:6.0
+    <<: *logging
+    restart: unless-stopped
+    env_file: [./deploy/.env]
+    volumes:
+      - mongo-data:/data/db
+    networks: [data]
+    # 刻意不发布端口：只有 backend 需要访问它
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' | grep -q 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # ============================================================
+  # 沙箱用的 Docker daemon
+  # ============================================================
+  # backend 通过 DOCKER_HOST=tcp://dind:2375 驱动它创建 erp-sandbox-* 容器。
+  # 相比挂宿主机 /var/run/docker.sock，沙箱容器被圈在 dind 自己的
+  # 镜像/容器存储里，删掉这个卷就等于清空所有沙箱，也不污染宿主机。
+  #
+  # 注意：backend 能驱动 daemon API，而 dind 是 privileged —— 隔离边界仍在
+  # 宿主机层面，不是安全沙箱的替代品，只应部署在受控网络内。
+  dind:
+    image: docker:27-dind
+    <<: *logging
+    restart: unless-stopped
+    privileged: true
+    command: ["--storage-driver=overlay2", "--mtu=1400"]
+    environment:
+      # 必须是空字符串：默认值会让 entrypoint 启用 TLS 并只监听 2376，
+      # 后端连 tcp://dind:2375 会 connection refused。
+      DOCKER_TLS_CERTDIR: ""
+    sysctls:
+      # 沙箱容器访问 mcp 是"经 dind 转发 + MASQUERADE"（见 mcp-sandbox 网络）。
+      # dockerd 默认会开，这里显式写死避免依赖它的默认值 —— 关掉的话
+      # /etc/hosts 里的 mcp 地址能解析但连不通，表现为超时。
+      net.ipv4.ip_forward: 1
+    volumes:
+      # 必须是 named volume。bind mount 到宿主机 overlay2 的 upper dir 时
+      # dockerd 会报 "backing file system is unsupported for overlay2"。
+      - dind-data:/var/lib/docker
+      # dind 是独立 daemon，宿主机配的镜像加速它读不到。国内服务器上不配这个，
+      # sandbox-image-loader 卡在 docker pull python:3.11-slim 直到超时。
+      # 镜像站不可达时 dockerd 会自动回退到 Docker Hub，所以留着无害。
+      - ./deploy/dind-daemon.json:/etc/docker/daemon.json:ro
+    # mcp-sandbox 是沙箱内的代码够到 MCP 的唯一一跳：dind 转发 + MASQUERADE。
+    # 详见 deploy/README.md「沙箱内访问 MCP」。
+    networks: [sandbox, mcp-sandbox]
+    healthcheck:
+      test: ["CMD-SHELL", "docker info >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 40s
+
+  # 把沙箱基础镜像预先灌进 dind。
+  # 不这么做的话，首次 containers.run 里会夹一次 >60s 的镜像 pull。
+  sandbox-image-loader:
+    image: docker:27-cli
+    <<: *logging
+    restart: "no"
+    # SANDBOX_IMAGE 从 deploy/.env 读，与 backend 用同一个值
+    env_file: [./deploy/.env]
+    environment:
+      DOCKER_HOST: tcp://dind:2375
+    command: ["sh", "-c", "echo \"pulling $$SANDBOX_IMAGE\" && docker pull $$SANDBOX_IMAGE"]
+    networks: [sandbox]
+    depends_on:
+      dind: { condition: service_healthy }
+
+  # ============================================================
+  # 假 ERP（真 ERP 未开源，这里给一个行为一致的替身）
+  # ============================================================
+  mock-erp:
+    build: { context: ./deploy/mock-erp }
+    image: erp-mock:local
+    <<: *logging
+    restart: unless-stopped
+    networks: [data]
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8081/health',timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  # ============================================================
+  # MCP Server —— 必须在 backend 之前就绪（Agent 初始化要拉 23 个工具）
+  # ============================================================
+  mcp:
+    build: { context: ., dockerfile: Dockerfile }
+    image: erp-agent-app:local
+    <<: *logging
+    restart: unless-stopped
+    command: ["python", "-m", "src.mcp_server.server_main"]
+    environment:
+      ERP_BASE_URL: http://mock-erp:8081
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "9000"
+    networks:
+      data: {}
+      # 静态 IP：backend 把它写进沙箱容器的 /etc/hosts。用静态而不是每次
+      # 解析，是为了让 mcp 重建换 IP 后沙箱里的地址依然有效。
+      # 改这里必须同步改 deploy/.env 的 SANDBOX_MCP_HOST_IP。
+      mcp-sandbox:
+        ipv4_address: 172.31.0.10
+    depends_on:
+      mock-erp: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import socket;socket.create_connection(('127.0.0.1',9000),3).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  # ============================================================
+  # Backend API
+  # ============================================================
+  backend:
+    build: { context: ., dockerfile: Dockerfile }
+    image: erp-agent-app:local
+    <<: *logging
+    restart: unless-stopped
+    # env_file 提供密钥与默认值；下面的 environment 覆盖掉一切容器内不可达的
+    # 地址（compose 优先级：镜像 ENV < env_file < environment）。
+    env_file: [./deploy/.env]
+    environment:
+      # 只覆盖容器内不可达的地址；其余配置（含 SANDBOX_IMAGE、
+      # SANDBOX_WARM_POOL_SIZE、PUBLIC_BASE_URL）统一来自 deploy/.env。
+      MCP_SERVER_URL: http://mcp:9000
+      ERP_BASE_URL: http://mock-erp:8081
+      DOCKER_HOST: tcp://dind:2375
+      # 容器部署必须关：否则沙箱不可用时会在 backend 进程环境里
+      # （含 DEEPSEEK_API_KEY）执行模型生成的代码。
+      ALLOW_LOCAL_SHELL_FALLBACK: "false"
+      # 认人由 nginx 的 auth_basic 做，backend 只信它注入的 X-Authenticated-User。
+      # 前提是 backend 不对外发布端口 —— compose 里确实没有 ports，
+      # 一旦加上，任何人都能伪造这个头，认证形同虚设。
+      AUTH_MODE: proxy
+    volumes:
+      # 可写：web_fetch 会把沙箱里验证过的 Skill 写回这里，然后由
+      # SkillsSyncMiddleware 再推回沙箱。
+      # 代价：镜像里那份 src/skills 被完全遮蔽，改完必须落到宿主目录再
+      # restart backend，只 --build 不生效。
+      - ./src/skills:/app/src/skills
+      # 用 named volume 而不是 bind：src/download 在 .gitignore 里，新克隆的
+      # 仓库中目录不存在，Docker 会以 root:root 创建它。
+      - download-data:/app/src/download
+    networks: [edge, data, sandbox]
+    depends_on:
+      mongo:                { condition: service_healthy }
+      mcp:                  { condition: service_healthy }
+      dind:                 { condition: service_healthy }
+      sandbox-image-loader: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      # 预热池要在启动时创建沙箱容器，给足时间
+      start_period: 90s
+
+  # ============================================================
+  # 前端
+  # ============================================================
+  frontend:
+    build: { context: ./frontend }
+    image: erp-agent-frontend:local
+    <<: *logging
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      # standalone 的 server.js 读 process.env.HOSTNAME，容器里它默认是
+      # 容器 ID，不覆盖会 bind 失败。
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+    networks: [edge]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # ============================================================
+  # 统一入口
+  # ============================================================
+  nginx:
+    image: nginx:1.27-alpine
+    <<: *logging
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    # 独立的 env 文件：nginx 只需要 INTERNAL_AUTH_TOKEN，不该顺带拿到后端密钥。
+    # 文件含密钥、不入库，所以标 required: false —— 没建也能起来（等于不校验，
+    # backend 会在启动日志里打 WARNING）。容器部署应当先
+    #   cp deploy/nginx.env.example deploy/nginx.env && sh deploy/set_internal_token.sh
+    env_file:
+      - path: ./deploy/nginx.env
+        required: false
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # 镜像入口脚本会把 templates/*.template 用 envsubst 渲染进
+      # /etc/nginx/conf.d/，nginx.conf 里 include 的就是渲染结果。
+      - ./deploy/nginx/templates:/etc/nginx/templates:ro
+      # 必须先创建这个文件（见 deploy/README.md「创建登录账号」）。
+      # 注意：Docker 在源路径不存在时会**自动建一个同名目录**，于是 nginx
+      # 报的不是"文件不存在"而是 "is a directory"，而且会在仓库里留下一个
+      # 空目录。遇到就 rm -rf deploy/nginx/htpasswd 后按文档重新生成。
+      - ./deploy/nginx/htpasswd:/etc/nginx/htpasswd:ro
+    networks: [edge]
+    depends_on:
+      backend:  { condition: service_healthy }
+      frontend: { condition: service_healthy }
+    healthcheck:
+      # 走 /healthz（nginx 自己的常量响应，不认证）而不是 / —— 后者要
+      # Basic Auth，探针拿不到凭据只会一直 401。
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz | grep -q ok"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+networks:
+  edge:
+    # 默认网络：backend 靠它出网调 api.deepseek.com
+  data:
+    internal: true
+  sandbox:
+    # dind 要出网拉 python:3.11-slim
+    driver_opts:
+      com.docker.network.driver.mtu: "1400"
+  # 只放 mcp 和 dind。刻意与 data 分开：dind 一旦挂到 data 上，沙箱里模型
+  # 生成的代码就能顺着 dind 的路由够到 mongo:27017 —— internal: true 只挡
+  # 出网，不挡同宿主机上网络之间的转发，所以隔离靠的是"这个网络上没有别的
+  # 东西"，不是靠 internal。
+  #
+  # 这里**刻意不加 internal: true**：dind 同时挂在 sandbox 和本网络上，
+  # 多网络容器只有一条默认路由，指向哪个网络不确定。若指向一个 internal
+  # 网络，dind 会失去出网能力、拉不了沙箱镜像。本网络上只有 mcp 和 dind，
+  # 两者本来就有各自的出网口，去掉 internal 不额外扩大暴露面。
+  mcp-sandbox:
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
+
+volumes:
+  mongo-data:
+  dind-data:
+  download-data:

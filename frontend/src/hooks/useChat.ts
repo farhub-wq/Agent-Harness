@@ -6,6 +6,7 @@ import { ChatMessage, ToolCallInfo, SSEEvent, InterruptData, TodoItem } from "@/
 import { streamChat, resumeChat } from "@/lib/api";
 import { useSSE } from "./useSSE";
 
+// 仅本机开发（AUTH_MODE=none）下生效；容器部署下 backend 用认证身份覆盖它。
 const USER_ID = "user-001";
 const USERNAME = "采购管理员";
 

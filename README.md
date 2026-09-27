@@ -2,6 +2,9 @@
 
 > 基于 DeepAgent + LangGraph + MCP 协议的摩托车零部件采购智能助手，严格遵循 **Harness Engineering** 架构思想（Planning → Executing → Review → Result）。
 
+- 仓库：<https://github.com/farhub-wq/Agent-Harness>
+- 上游：[wodrake/ERP-AGENT-open-source](https://github.com/wodrake/ERP-AGENT-open-source)（本项目在其基础上继续开发，改动范围见下方「相对上游的改动」）
+
 ---
 
 ## 项目简介
@@ -17,6 +20,21 @@
 - 人工审批流程（HITL — Human-in-the-Loop）
 
 ---
+
+## 2026-09-26 更新
+
+本次把整个栈容器化（一条 `docker compose up -d` 起全栈），并修掉沙箱加固暴露出来的一批真问题。
+
+- **整栈容器编排**：新增 `Dockerfile`、`docker-compose.yml`、[deploy/](deploy/)。nginx 做统一入口 `:80`，后端 / 前端 / MongoDB / MCP / mock ERP 全部由 compose 管；沙箱改用 **`docker:dind` sidecar**（不再是手动 `docker run` 一个容器），backend 通过 `DOCKER_HOST=tcp://dind:2375` 驱动它。部署、运维、排错见 [deploy/README.md](deploy/README.md)。
+- **一键云部署**：新增 [deploy/cloud/](deploy/cloud/)，`pack.sh` 本机打包 → `bootstrap.sh` 在全新云主机上装 Docker、配镜像加速、建 swap、生成配置、构建、起服务并等 healthy。**只能是真虚拟机**，dind 需要 privileged，免费 PaaS 全部会在创建 dind 那步失败。
+- **认证与多用户隔离**：新增 `src/api_view/auth.py`。整个服务在 nginx 的 HTTP Basic Auth 后面，backend 用 nginx 注入的 `X-Authenticated-User` 派生 `user_id`，并丢弃请求体/查询串里客户端自带的 `user_id`。改造前 `user_id` 是前端硬编码的 `user-001`，所有浏览器共享同一份历史和同一个沙箱，且会话读写删接口不校验归属。
+- **挡住沙箱伪造身份**：沙箱容器跑在 dind 里、与 backend 同处一张 Docker 网络，因此沙箱中模型生成的代码可以绕过 nginx 直连 backend 冒充任意用户。修法是 nginx ↔ backend 共享密钥 `INTERNAL_AUTH_TOKEN`（`deploy/set_internal_token.sh` 一次写入两处，backend 用 `secrets.compare_digest` 校验）。留空 = 不校验，启动时打 WARNING。
+- **沙箱加固的三个真坑**（都是"加固配置本身没生效"导致长期没被发现，详见 `src/agent/backends/` 里的注释）：① 该 daemon 上容器内 tmpfs 被强制挂成 `noexec`，依赖目录必须挂匿名 volume，否则 numpy 的 `.so` 装得进去、import 就炸；② `seccomp.json` 原先缺 `arch_prctl`，且旧代码把**路径**传给了 `seccomp=` 参数，daemon 解析失败后静默降级 basic 模式 —— 这个白名单从来没真正生效过；③ 只读 rootfs 下 Docker daemon 的 archive 接口拒绝往任何 tmpfs 写（报 `container rootfs is marked read-only`），而 bootstrap 原本是"tar 传到 `/tmp` 再解开"，所以在加固沙箱上这步从来没成功过，宿主进程上只是静默降级成 LocalShell。解法是新增 `SANDBOX_TRANSFER_DIR`（挂匿名 volume）当上传落地点。
+- **grader 终于能看到工具调用**：SDK 只把最近 30 条消息交给 grader，而一次任务轻松 30+ 次工具调用，开头的 ERP 查询被挤出窗口后会被判成"无工具证据、疑似编造"。新增 `src/agent/middlewares/grader_transcript.py`，在窗口截断**之前**把原始需求和全量工具调用台账写进去。
+- **自建 mock ERP**：上游开源版只有 Agent 侧，MCP 的 23 个工具指向的 Java ERP 后端**没有开源**。新增 [deploy/mock-erp/](deploy/mock-erp/) —— 一个 FastAPI 替身，同样返回 `{code,message,data}` 信封，种子数据固定（`random.Random(42)`），让项目能独立跑起来。
+- **其它修复**：`prune_orphans` 不再误删用户沙箱容器；>73KB 的沙箱文件下载不再被截断（改走 `exec_run` 直跑 `base64 -w0`）；tmpfs 总量按 `mem_limit` 等比缩放，避免 OOM 而不是干净的 ENOSPC；docker 客户端 socket 超时提到 `DOCKER_TIMEOUT_SECONDS`（默认 1200s）并先于容器内 `timeout(1)` 触发。
+
+> **密钥管理**：`.env`、`deploy/.env`、`deploy/nginx.env`、`deploy/nginx/htpasswd` 一律在 `.gitignore` 里，仓库只保留 `*.example` 模板。这些文件里的值请填成你自己的，不要把真实密码/Key 提交上来。
 
 ## 2026-09-19 更新
 
@@ -270,12 +288,14 @@ ERP-AGENT/
 │   │   ├── config.py                  # 全局配置
 │   │   ├── middleware_config.py       # 子Agent中间件工厂
 │   │   ├── backends/                  # Docker 沙箱后端
+│   │   │   ├── docker_client.py       # daemon 连接与超时（dind / 本机 socket）
 │   │   │   ├── custom_opensandbox.py  # Docker SDK 封装（30+ 方法）
 │   │   │   ├── sandbox_setup.py       # 安全沙箱创建 + 多语言运行时
 │   │   │   ├── sandbox_manager.py     # 五态生命周期管理
 │   │   │   ├── sandbox_proxy.py       # 代理层（热替换）
 │   │   │   └── seccomp.json           # seccomp 安全策略
 │   │   ├── middlewares/               # 自定义中间件
+│   │   │   └── grader_transcript.py   # 把全量工具调用台账喂给 grader
 │   │   ├── tools/                     # 10 个基础自定义工具 + 2 个记忆工具
 │   │   │   ├── document_generator.py  # 文档生成（MD/HTML/CSV/JSON）
 │   │   │   ├── download_sandbox_file.py # 沙箱文件下载
@@ -293,6 +313,7 @@ ERP-AGENT/
 │   │       └── prompts.py             #   系统提示词 + 记忆使用规范
 │   ├── api_view/                      # FastAPI Web 层
 │   │   ├── web_main.py                # 应用入口
+│   │   ├── auth.py                    # Basic Auth 用户解析 + 共享密钥校验
 │   │   ├── agent_loader.py            # Agent 单例（MongoDB持久化）
 │   │   ├── mongodb_store.py           # LangGraph Store（MongoDB实现）
 │   │   └── api/                       # 路由（chat + history）
@@ -300,10 +321,73 @@ ERP-AGENT/
 │   ├── skills/                        # 技能文件（文件夹级）
 │   └── download/                      # 生成文件下载目录
 │
+├── deploy/                            # 容器化部署
+│   ├── README.md                      # 架构 / 运维 / 排错（认证、沙箱网络都在这）
+│   ├── .env.example                   # 容器部署配置模板（复制为 deploy/.env）
+│   ├── nginx.env.example              # nginx↔backend 共享密钥模板（同理不入库）
+│   ├── set_internal_token.sh          # 一次写入 deploy/.env 与 deploy/nginx.env
+│   ├── nginx/                         # nginx.conf + 注入共享密钥的模板
+│   ├── mock-erp/                      # 自建 FastAPI 替身（上游的 Java ERP 未开源）
+│   └── cloud/                         # 整机一键部署（pack.sh + bootstrap.sh）
+│
+├── Dockerfile                         # 后端镜像
+├── docker-compose.yml                 # nginx/backend/frontend/mongo/mcp/mock-erp/dind
+├── .dockerignore
 ├── .env.example                       # 环境变量模板（复制为 .env）
 ├── requirements.txt                   # Python 依赖
-└── README.md                           # 项目说明与启动指南
+├── WSL_START.md                       # WSL 本机启动说明
+└── README.md                          # 项目说明与启动指南
 ```
+
+---
+
+## 相对上游的改动
+
+本仓库 fork 自 [wodrake/ERP-AGENT-open-source](https://github.com/wodrake/ERP-AGENT-open-source)，在其基础上补齐了「能真正部署出去」所需的全部部分：
+
+| 方向 | 上游 | 本仓库 |
+|------|------|--------|
+| 部署方式 | 手动按文档起 5 个进程 | `docker compose up -d` 起全栈，nginx 统一入口 |
+| 沙箱 | 手动 `docker run` 一个容器 | `docker:dind` sidecar + 五态生命周期 + 预热池 |
+| 认证 | 无，前端硬编码 `user-001` | nginx Basic Auth + 按用户隔离的 `user_id` + 共享密钥 |
+| 多租户越权 | 会话读写删不校验归属 | 一律校验归属，跨用户 403 |
+| ERP 依赖 | 指向未开源的 Java 服务，跑不起来 | `deploy/mock-erp/` 自建替身，可独立运行 |
+| grader 证据 | 只看最近 30 条消息，长任务误判编造 | 全量工具调用台账先于截断注入 |
+
+上游的开源代码本身没有密钥泄漏，本仓库也没有；**所有密码类配置一律不入库**，仓库里只有 `*.example` 模板。
+
+---
+
+## Docker 部署（推荐用于服务器）
+
+```bash
+cp deploy/.env.example deploy/.env   # 填 DEEPSEEK_API_KEY 和 PUBLIC_BASE_URL
+# 创建登录账号，否则 nginx 起不来（htpasswd 的三种生成方式见 deploy/README.md）
+docker run --rm httpd:2.4-alpine htpasswd -nbB 张三 '你的密码' > deploy/nginx/htpasswd
+# 生成 nginx ↔ backend 的共享密钥（对公网部署必配，原因见 deploy/README.md）
+cp deploy/nginx.env.example deploy/nginx.env
+sh deploy/set_internal_token.sh
+docker compose up -d --build
+```
+
+nginx 统一入口 `:80`，后端 / 前端 / MongoDB / MCP / 沙箱 dind 全部由 compose 编排，
+沙箱不再需要手动 `docker run`。完整说明、运维命令、已知限制与故障排查见
+[deploy/README.md](deploy/README.md)。
+
+想在一台全新的云主机上从零跑起来（含 Docker 安装、镜像加速、swap、配置生成），
+用 [deploy/cloud/README.md](deploy/cloud/README.md) 里的一键脚本：
+
+```bash
+bash deploy/cloud/pack.sh /tmp/erp-agent-deploy.tar.gz   # 本机打包
+DEEPSEEK_API_KEY=sk-xxxx bash deploy/cloud/bootstrap.sh <服务器IP>   # 服务器上
+```
+
+整个服务在 nginx 的 HTTP Basic Auth 后面，backend 用 nginx 注入的用户名决定
+`user_id`（会话、历史、沙箱按人隔离）。本机开发 `AUTH_MODE=none` 时不启用。
+
+> 容器部署**只能单副本**：沙箱生命周期与用户会话都是进程内状态。
+
+下面的裸机步骤适合本机开发调试。
 
 ---
 
@@ -321,8 +405,8 @@ ERP-AGENT/
 
 ```bash
 # 克隆项目
-git clone <repo-url>
-cd ERP-AGENT
+git clone https://github.com/farhub-wq/Agent-Harness.git
+cd Agent-Harness
 
 # Python 依赖
 pip install -r requirements.txt
@@ -339,7 +423,7 @@ cd ..
 
 ```bash
 # DeepSeek API Key（主对话、grader、联网搜索共用）
-DEEPSEEK_API_KEY=sk-your-api-key
+DEEPSEEK_API_KEY=sk-xxxx
 LLM_MODEL=deepseek-flash
 LLM_BASE_URL=https://api.deepseek.com
 WEB_SEARCH_MODEL=deepseek-flash
@@ -481,7 +565,12 @@ WARM 摘要在每次模型调用前刷新，最多 4000 字符；更早的任务
 | GET | `/api/history/{user_id}` | 获取会话列表 |
 | DELETE | `/api/history/{thread_id}` | 删除会话 |
 | GET | `/api/download/{filename}` | 下载生成文件 |
-| GET | `/health` | 健康检查 |
+| GET | `/health` | 健康检查（后端就绪） |
+| GET | `/healthz` | 存活探针（仅经 nginx，不认证） |
+
+容器部署下 `/api/*` 由 nginx 反代并注入 `X-Authenticated-User` 与 `X-Internal-Auth`，
+backend 在 `AUTH_MODE=proxy` 下按它们派生 `user_id` 并校验共享密钥；请求头缺失返回
+401。本机开发 `AUTH_MODE=none`，行为与改造前一致。详见 [deploy/README.md](deploy/README.md)。
 
 ---
 
@@ -491,3 +580,36 @@ WARM 摘要在每次模型调用前刷新，最多 4000 字符；更早的任务
 - 添加新工具：在 `src/agent/tools/` 创建工具文件，在 `main_agent.py` 注册
 - 添加新中间件：在 `src/agent/middlewares/` 创建，在 `main_agent.py` 中间件栈中添加
 - 修改子Agent：编辑 `src/agent/subagents/configs/*.yaml`
+- 改部署拓扑 / 排查容器问题：[deploy/README.md](deploy/README.md)
+
+---
+
+## 提交前检查
+
+仓库里**不应该**出现真实凭据。`.gitignore` 已经挡住这几个文件，改动它们之后
+`git status` 不应把它们列为可提交：
+
+| 文件 | 内容 |
+|------|------|
+| `.env` | DeepSeek API Key、本地 Mongo 连接串 |
+| `deploy/.env` | 容器部署的 Mongo 密码、API Key |
+| `deploy/nginx.env` | nginx ↔ backend 共享密钥 |
+| `deploy/nginx/htpasswd` | Basic Auth 密码哈希 |
+
+模板（`*.example`）里一律写占位值 `xxxx`。提交前自查：
+
+```bash
+git status --short                # 上面四个文件不应出现在列表里
+git grep -nIE 'sk-[A-Za-z0-9]{20,}'   # 应当没有输出
+```
+
+---
+
+## 来源与致谢
+
+- 上游项目：[wodrake/ERP-AGENT-open-source](https://github.com/wodrake/ERP-AGENT-open-source)（Agent 侧开源实现，本项目在其之上继续开发）
+- Agent 框架：[DeepAgent](https://github.com/langchain-ai/deepagents) + [LangGraph](https://github.com/langchain-ai/langgraph)
+- 工具协议：[Model Context Protocol](https://modelcontextprotocol.io/)
+- 模型：DeepSeek
+
+本项目仓库未附 License 文件，如需商用请先确认上游的授权条款。

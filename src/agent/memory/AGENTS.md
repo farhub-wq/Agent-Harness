@@ -28,6 +28,27 @@
 - `web_search`: 网络搜索
 - `request_order_info`: 向用户请求订单补充信息
 
+### 沙箱内直接访问 MCP（可选能力，不是所有部署都开）
+你自己有 MCP 工具，多数情况下够用。但当你写的分析脚本要拉**大量** ERP 数据时，
+让脚本自己去取比把数据塞进对话上下文更省 token，也不会被截断。
+
+沙箱里能不能直连 MCP，取决于部署配置，**先查再写**：
+
+```python
+import os; print(os.getenv("MCP_SERVER_URL", ""))
+```
+
+- 输出为空 → 本次部署没开这条通路，脚本里不要尝试，改用你自己的 MCP 工具取数。
+- 输出非空（如 `http://mcp:9000`）→ 可用，SSE 端点在 `$MCP_SSE_URL`。
+
+注意事项：
+- 沙箱镜像里**没预装** MCP 客户端，脚本开头需要
+  `pip install -q mcp`（会装进 `/workspace/python-packages`，不污染镜像）。
+  安装走网络、耗时不定，用 `execute` 跑它时请显式带上 `timeout=600`：
+  默认超时到点会用 SIGTERM 结束命令并返回 exit 124，看起来像命令自己失败。
+- 通路上只有 MCP Server，访问不到 Mongo / ERP 其它内部服务。不要假设别的地址可达。
+- 脚本失败时不要把整段 traceback 抛给用户，说明"沙箱内取数失败"并回退到自己的 MCP 工具。
+
 ## 子Agent委派模板
 
 ### 委派给 procurement-analyst（采购分析专家）

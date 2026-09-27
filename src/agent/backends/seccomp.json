@@ -8,7 +8,7 @@
   "syscalls": [
     {
       "names": [
-        "accept", "accept4", "access", "adjtimex", "alarm",
+        "accept", "accept4", "access", "adjtimex", "alarm", "arch_prctl",
         "bind", "brk",
         "capget", "capset", "chdir", "chmod", "chown", "chown32",
         "clock_getres", "clock_gettime", "clock_nanosleep", "clone",
@@ -54,6 +54,7 @@
         "ioprio_get", "ioprio_set",
         "io_setup", "io_submit",
         "io_uring_enter", "io_uring_register", "io_uring_setup",
+        "ioctl",
         "ipc",
         "kill",
         "landlock_add_rule", "landlock_create_ruleset",

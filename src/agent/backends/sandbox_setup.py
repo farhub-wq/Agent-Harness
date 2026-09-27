@@ -13,16 +13,49 @@ Harness 核心思想：
 """
 import json
 import docker
+from docker.types import Mount
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
 from .custom_opensandbox import CustomOpenSandbox
+from .docker_client import get_docker_client
 from ..log_utils import sandbox_logger
-from ..config import SANDBOX_WORK_DIR, SANDBOX_IMAGE
+from ..config import (
+    SANDBOX_WORK_DIR,
+    SANDBOX_IMAGE,
+    SANDBOX_EXECUTE_TIMEOUT_SECONDS,
+    ALLOW_LOCAL_SHELL_FALLBACK,
+)
 
 # 项目根目录（用于定位本地文件同步到沙箱）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
+# 第三方依赖安装目录（``PIP_TARGET`` / ``PYTHONPATH``）。
+#
+# 必须挂在一个独立 volume 上，不能放在 tmpfs 里：Docker Desktop 与 dind 都会
+# 把容器内的 tmpfs 强制挂成 noexec（即使显式请求 ``exec`` 也一样），而
+# numpy / matplotlib 这类包的 ``.so`` 需要可执行映射，落在 tmpfs 上会以
+# ``failed to map segment from shared object`` 加载失败 —— pip 装得进去，
+# import 就炸。volume 落在 daemon 的真实文件系统上，不受此限制。
+#
+# 用匿名 volume（``Mount`` 不带 source）而不是具名 volume，是为了让
+# ``container.remove(v=True)`` 在删容器时顺带回收它，不必再维护一套
+# 「容器名 → volume 名」的映射。
+SANDBOX_PACKAGE_DIR = "/workspace/python-packages"
+
+# 传输中转目录（``upload_files`` / ``upload_directory`` 的落地点）。
+#
+# 只读 rootfs 下 Docker daemon 会拒绝 archive 接口往**任何 tmpfs** 上写：
+#     PUT /containers/{id}/archive?path=/tmp
+#     → 500 "container rootfs is marked read-only"
+# 实测（erp-verify/v13_put_archive.py）：/tmp、/workspace、/skills 三个 tmpfs
+# 全部 400，只有 volume 上的路径能写成功；把 read_only 关掉后 /tmp 就能写，
+# 说明判定依据是 ReadonlyRootfs，与目标目录是否可写无关。
+#
+# 所以凡是走 Docker archive API 的上传都必须落在 volume 上（exec 写文件不受
+# 影响，任何可写目录都行）。
+SANDBOX_TRANSFER_DIR = "/workspace/.transfer"
 
 
 # ============================================================
@@ -43,7 +76,7 @@ class SandboxConfig:
     memory_limit: str = "512m"
     cpu_limit: float = 1.0
     network_mode: str = "bridge"          # "none" = 完全隔离, "bridge" = 受限
-    tmpfs_size: str = "128m"
+    tmpfs_size: str = "512m"
     drop_all_caps: bool = True
     use_seccomp: bool = True
     seccomp_path: str = ""                # 空则使用内置 seccomp.json
@@ -55,12 +88,99 @@ class SandboxConfig:
     # --- 环境变量注入 ---
     env_vars: dict[str, str] = field(default_factory=dict)
 
+    # --- /etc/hosts 注入 ---
+    # 沙箱容器跑在 dind 自己的 bridge 网络里，解析不了 compose 的服务名。
+    # 需要在沙箱内按名字访问某个 compose 服务时，在这里写死 name → IP。
+    extra_hosts: dict[str, str] = field(default_factory=dict)
+
 
 # ============================================================
 # 内置 seccomp 路径
 # ============================================================
 
 _BUILTIN_SECCOMP = str(Path(__file__).parent / "seccomp.json")
+
+
+# ============================================================
+# tmpfs 配额
+# ============================================================
+
+# tmpfs 的页**计入容器的 memory cgroup**，所以几个 tmpfs 的 size 之和必须明显
+# 小于 mem_limit —— 差值是留给容器内进程（Python 解释器、pip、matplotlib）本身
+# 的内存。默认配置里 /tmp 512m + /workspace 1g + /skills 256m = 1.75g，而
+# mem_limit 只有 512m，于是 Agent 往 /workspace 写一个几百 MB 的导出文件时，
+# 触发的不是干净的 ENOSPC（磁盘满），而是整个容器被 OOM killer 杀掉：本轮所有
+# 中间结果全丢，还会连锁触发 SandboxHealthMiddleware 重建容器。
+#
+# 所以这里不硬编码尺寸，而是按 mem_limit 推导并等比缩放，保证不变量成立 ——
+# 无论调用方把 mem_limit 配成多少，都不可能配出一个"写自己的 tmpfs 就把自己
+# 写死"的容器。
+# 0.5：留一半给进程。matplotlib + numpy + pandas 常驻 RSS 在 200MB 量级，
+# 512m 的 mem_limit 下如果没有这一半空档，正常绘图任务自己就会顶到上限。
+_TMPFS_BUDGET_RATIO = 0.5
+
+# 期望配额（未超预算时原样使用）。打包进 tmpfs 的中间产物是图表 PNG、CSV、
+# HTML/Markdown 报告这类，1g 的 /workspace 是够的。
+_TMPFS_DESIRED = (
+    ("/tmp", 512 * 1024 * 1024),
+    ("/workspace", 1024 * 1024 * 1024),
+    ("/skills", 256 * 1024 * 1024),
+)
+
+_SIZE_SUFFIXES = {"": 1, "b": 1, "k": 1024, "m": 1024**2, "g": 1024**3}
+
+
+def _parse_size(value: str | int) -> int:
+    """把 Docker 风格的尺寸串（"512m" / "1g" / 逗号分隔的字节数）解析成字节。"""
+    if isinstance(value, int):
+        return value
+    text = str(value).strip().lower().replace(",", "")
+    for suffix, factor in sorted(_SIZE_SUFFIXES.items(), key=lambda kv: -len(kv[0])):
+        if suffix and text.endswith(suffix):
+            return int(float(text[: -len(suffix)]) * factor)
+    return int(float(text))
+
+
+def _human(num_bytes: int) -> str:
+    for unit, factor in (("g", 1024**3), ("m", 1024**2), ("k", 1024)):
+        if num_bytes >= factor and num_bytes % factor == 0:
+            return f"{num_bytes // factor}{unit}"
+    return str(num_bytes)
+
+
+def build_tmpfs_spec(memory_limit: str | int, tmp_size: str | int) -> dict[str, str]:
+    """按 mem_limit 推导各个 tmpfs 的挂载参数。
+
+    ``/tmp`` 用调用方给的 ``tmp_size``，``/workspace`` 与 ``/skills`` 用
+    :data:`_TMPFS_DESIRED`；三者之和超过 ``mem_limit * _TMPFS_BUDGET_RATIO``
+    时等比缩放，并记一条 warning —— 缩放在"用户配了个小 mem_limit"时是静默
+    的容量变化，必须能从日志里看出来。
+    """
+    desired = {"/tmp": _parse_size(tmp_size)}
+    for path, size in _TMPFS_DESIRED:
+        desired.setdefault(path, size)
+
+    budget = int(_parse_size(memory_limit) * _TMPFS_BUDGET_RATIO)
+    total = sum(desired.values())
+    if total > budget:
+        scale = budget / total
+        desired = {path: max(16 * 1024 * 1024, int(size * scale)) for path, size in desired.items()}
+        sandbox_logger.warning(
+            f"tmpfs quota {_human(total)} exceeds {_TMPFS_BUDGET_RATIO:.0%} of "
+            f"mem_limit {memory_limit}; scaled to {_human(sum(desired.values()))} "
+            f"({', '.join(f'{p}={_human(s)}' for p, s in desired.items())}) — "
+            "tmpfs pages count against the container cgroup, so the sum must stay "
+            "below mem_limit or a large write OOM-kills the sandbox"
+        )
+
+    # 除 /skills 外都保持 noexec：/skills 只放文本文件，不需要 exec 位。
+    # noexec 是被 daemon 强制的（见 SANDBOX_PACKAGE_DIR 注释），这里写出来是为了
+    # 让配置本身自解释。
+    return {
+        "/tmp": f"rw,noexec,nosuid,size={desired['/tmp']}",
+        "/workspace": f"rw,noexec,nosuid,size={desired['/workspace']}",
+        "/skills": f"rw,nosuid,nodev,size={desired['/skills']}",
+    }
 
 
 # ============================================================
@@ -92,14 +212,15 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
         with open(seccomp_path, "r") as f:
             seccomp_profile = f.read()
 
-    client = docker.from_env()
+    client = get_docker_client()
 
     # 检查容器是否已存在，存在则先移除
     try:
         existing = client.containers.get(config.name)
         sandbox_logger.info(f"Removing existing container: {config.name}")
         existing.stop(timeout=3)
-        existing.remove(force=True)
+        # v=True 一并回收依赖目录的匿名 volume，否则同名容器重建会漏 volume
+        existing.remove(force=True, v=True)
     except docker.errors.NotFound:
         pass
 
@@ -109,13 +230,19 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
         "mem_limit": config.memory_limit,
         "nano_cpus": int(config.cpu_limit * 1e9),
         "pids_limit": 256,
-        "tmpfs": {
-            "/tmp": f"rw,noexec,nosuid,size={config.tmpfs_size}",
-            "/workspace": f"rw,noexec,nosuid,size=256m",
-            # ``--read-only`` 会让根目录下的 /skills 不可写；Skills 同步、
-            # 用户 Skills 恢复都必须在独立的可写挂载点完成。
-            "/skills": "rw,nosuid,nodev,size=128m",
-        },
+        # 配额按 mem_limit 推导，避免"写自己的 tmpfs 把容器写 OOM"（见
+        # build_tmpfs_spec）。/workspace 放图表、CSV 等中间产物，第三方依赖不走
+        # 这里（见 SANDBOX_PACKAGE_DIR）；/skills 是因为 --read-only 会让根目录下
+        # 的 /skills 不可写，Skills 同步与用户 Skills 恢复必须有独立可写挂载点。
+        "tmpfs": build_tmpfs_spec(config.memory_limit, config.tmpfs_size),
+        # 依赖目录单独挂匿名 volume：tmpfs 被 daemon 强制 noexec，
+        # 编译型扩展模块在那里无法 dlopen（详见 SANDBOX_PACKAGE_DIR 注释）。
+        # 传输目录同理必须是 volume：只读 rootfs 下 archive API 写不进 tmpfs
+        # （详见 SANDBOX_TRANSFER_DIR 注释）。
+        "mounts": [
+            Mount(target=SANDBOX_PACKAGE_DIR, source="", type="volume"),
+            Mount(target=SANDBOX_TRANSFER_DIR, source="", type="volume"),
+        ],
     }
 
     # 网络模式
@@ -123,6 +250,10 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
         host_config_kwargs["network_mode"] = "none"
     else:
         host_config_kwargs["network_mode"] = config.network_mode
+
+    # /etc/hosts 注入（沙箱内按名字访问 compose 服务，见 SANDBOX_MCP_* 配置）
+    if config.extra_hosts:
+        host_config_kwargs["extra_hosts"] = dict(config.extra_hosts)
 
     # Capability 安全
     if config.drop_all_caps:
@@ -133,7 +264,8 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
     # seccomp 安全策略
     security_opts = []
     if seccomp_profile:
-        security_opts.append(f"seccomp={seccomp_path}")
+        # daemon 期望 seccomp= 后跟 profile 的 JSON 内容，不是文件路径
+        security_opts.append(f"seccomp={seccomp_profile}")
     security_opts.append("no-new-privileges:true")
     host_config_kwargs["security_opt"] = security_opts
 
@@ -142,8 +274,12 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONUNBUFFERED": "1",
         # 根文件系统保持只读时，第三方依赖安装到工作区而非 /usr/local。
-        "PIP_TARGET": "/workspace/python-packages",
-        "PYTHONPATH": "/workspace/python-packages",
+        "PIP_TARGET": SANDBOX_PACKAGE_DIR,
+        "PYTHONPATH": SANDBOX_PACKAGE_DIR,
+        # 默认的 ~/.config/matplotlib 落在只读根文件系统上，import matplotlib
+        # 每次都会警告 "mkdir -p failed ... Read-only file system" 再退回 /tmp。
+        # 直接指到可写的 tmpfs，省掉这次失败尝试和噪音日志。
+        "MPLCONFIGDIR": "/tmp/matplotlib",
     }
     environment.update(config.env_vars)
 
@@ -169,6 +305,16 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
         )
 
     except Exception as e:
+        if not ALLOW_LOCAL_SHELL_FALLBACK:
+            # 基础模式丢掉 read_only / cap_drop / seccomp / 资源限制，
+            # 等于把无隔离容器交给模型生成的代码。容器部署宁可直接失败，
+            # 让 HealthMiddleware 走重建，也不要静默降级。
+            sandbox_logger.error(
+                f"Secure sandbox creation failed ({e}); basic-mode fallback "
+                f"disabled (ALLOW_LOCAL_SHELL_FALLBACK=false)"
+            )
+            raise
+
         # 安全创建失败时，回退到基础模式
         sandbox_logger.warning(
             f"Secure sandbox creation failed ({e}), falling back to basic mode"
@@ -176,7 +322,7 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
         try:
             existing = client.containers.get(config.name)
             existing.stop(timeout=3)
-            existing.remove(force=True)
+            existing.remove(force=True, v=True)
         except docker.errors.NotFound:
             pass
 
@@ -192,10 +338,18 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
             f"Basic sandbox created (fallback): {config.name} ({container.id[:12]})"
         )
 
-    client.close()
+    # client 是进程级共享的，不在这里关闭（见 docker_client 模块）。
 
-    # 创建 CustomOpenSandbox 实例连接到新容器
-    sandbox = CustomOpenSandbox(container_name=config.name)
+    # 创建 CustomOpenSandbox 实例连接到新容器。
+    # 显式给默认超时：SDK 的 DEFAULT_EXECUTE_TIMEOUT 是 120s，而这个默认值在
+    # execute() 学会真正使用 timeout 之前一直是空转的，现在会真的下发到容器内的
+    # timeout(1)。本项目 AGENTS.md 明确要求脚本开头 `pip install -q mcp`，加上
+    # 按需装 matplotlib/numpy，120s 在慢网络下会被直接 SIGTERM，模型看到的是
+    # exit 124 而不知道是自己超时。见 config.SANDBOX_EXECUTE_TIMEOUT_SECONDS。
+    sandbox = CustomOpenSandbox(
+        container_name=config.name,
+        timeout=SANDBOX_EXECUTE_TIMEOUT_SECONDS,
+    )
 
     # 初始化运行时环境
     _init_runtimes(sandbox, config.runtimes)
@@ -244,11 +398,13 @@ def _init_python_runtime(sandbox: CustomOpenSandbox):
     else:
         sandbox_logger.warning("Python not available in sandbox")
 
-    # 安装常用数据分析包
+    # 安装常用数据分析包。实测冷装 matplotlib+pandas+numpy 要 2 分 24 秒
+    # （网络波动下更久），所以显式给一个宽裕的超时，别落到 120s 默认值上。
     resp = sandbox.execute(
-        "mkdir -p /workspace/python-packages && "
-        "python3 -m pip install --no-cache-dir --target /workspace/python-packages "
-        "matplotlib pandas numpy -q 2>&1 | tail -5"
+        f"mkdir -p {SANDBOX_PACKAGE_DIR} && "
+        f"python3 -m pip install --no-cache-dir --target {SANDBOX_PACKAGE_DIR} "
+        "matplotlib pandas numpy -q 2>&1 | tail -5",
+        timeout=900,
     )
     if resp.exit_code == 0:
         sandbox_logger.info("Python packages installed: matplotlib, pandas, numpy")
@@ -268,7 +424,7 @@ def _init_go_runtime(sandbox: CustomOpenSandbox):
         "&& rm /tmp/go.tar.gz "
         "&& export PATH=$PATH:/usr/local/go/bin "
         "&& go version",
-        timeout=120,
+        timeout=600,
     )
     if resp.exit_code == 0:
         sandbox_logger.info(f"Go installed: {resp.output.strip()}")
@@ -287,7 +443,7 @@ def _init_node_runtime(sandbox: CustomOpenSandbox):
     resp = sandbox.execute(
         "apt-get update -qq && apt-get install -y -qq nodejs npm 2>&1 | tail -3 "
         "&& node --version",
-        timeout=120,
+        timeout=600,
     )
     if resp.exit_code == 0:
         sandbox_logger.info(f"Node installed: {resp.output.strip()}")
@@ -306,7 +462,7 @@ def _init_java_runtime(sandbox: CustomOpenSandbox):
     resp = sandbox.execute(
         "apt-get update -qq && apt-get install -y -qq default-jdk-headless 2>&1 | tail -3 "
         "&& java --version",
-        timeout=180,
+        timeout=600,
     )
     if resp.exit_code == 0:
         sandbox_logger.info(f"Java installed: {resp.output.strip()}")
@@ -323,7 +479,7 @@ def _init_rust_runtime(sandbox: CustomOpenSandbox):
     resp = sandbox.execute(
         "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y 2>&1 | tail -5 "
         "&& source $HOME/.cargo/env && rustc --version",
-        timeout=180,
+        timeout=600,
     )
     if resp.exit_code == 0:
         sandbox_logger.info(f"Rust installed: {resp.output.strip()}")
