@@ -159,6 +159,13 @@ jobs:
       # 东西拦住它 —— 直到有人手工去构建才发现。按路径过滤是"以为覆盖了"的
       # 反面教材，而 build context 是 . 时，docker-compose.yml / Dockerfile 的
       # 改动同样必须触发前端构建。
+
+      # buildx 必须显式 setup。不写这一行，buildx 会落到默认的 `docker` driver，
+      # 而它不支持 `cache-to: type=gha` —— 构建直接死在
+      # "Cache export is not supported for the docker driver" 上，跟 Dockerfile 无关。
+      # 后端 job 一直有 setup-buildx-action，前端这里漏了，所以是「后端绿、前端红」。
+      - uses: docker/setup-buildx-action@v3
+
       - name: 构建前端镜像
         uses: docker/build-push-action@v6
         with:
