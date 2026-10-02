@@ -21,6 +21,19 @@
 
 ---
 
+## 2026-10-02 更新
+
+本次补上「发布与回滚」，并修掉一个会挡住前端镜像构建的错误。
+
+- **发布 / 回滚工具**：新增 [deploy/cd/](deploy/cd/)（`deploy.sh` / `status.sh` / `lib.sh` / `package.filter`）。同步源码树走 `git archive <sha>` + `rsync --delete --filter`，取源是一个**裸镜像仓库**，所以既不依赖 GitHub 可达、也不依赖工作区干净——物理上只可能同步已提交的内容。回滚**同时还原镜像和源码树**（宿主源码树是部署产物的一部分，见下条），`state/production.env` 是「这台机器现在跑的是哪一版」的唯一真值源，记的是 **digest 而不是 tag**（tag 可以被重新指向，digest 不能）。
+- **为什么回滚必须连源码树一起回**：四个 bind mount 把宿主文件直接喂进容器——`src/skills` → backend、`deploy/nginx/**` → nginx、`deploy/dind-daemon.json` → dind。只回滚镜像会让线上变成「镜像旧、配置新」。推论：`docker compose up -d` **不会**因为 bind 文件的内容变了而重建容器，改了 `deploy/nginx/**` 就必须显式 `--force-recreate nginx`（脚本用哈希比对自动做这件事）。
+- **退出码语义**（CI 靠它区分处置方式）：`0` 成功 / `1` 前置失败 / `2` 备份失败 / `3` 同步失败 / `4` 影子启动失败 —— 前四种生产**完全没动过**；`5` 换版失败已回滚 / `6` 观察窗失败已回滚 / `7` **回滚也失败，需要人工介入**。注意**回滚成功是 5 不是 0**：回滚不算发布成功。
+- **真机实测的停机窗口**：正常换版 **44s**、坏版本自动回滚 **134s**（其中约 100s 是 compose 自己探测 `depends_on` 健康条件失败）、镜像没换时的同版本重发布只要 **4s**。`backend` 必须单副本（沙箱注册表与会话是进程内状态），所以每次换版必然停机，SSE 实断约 20s。
+- **两条不能碰的死线**（写在 `lib.sh` 的 `cd_compose()` 里，是代码而不是注释）：`docker compose down` 会重建网络，破坏 `mcp-sandbox` 静态 IP 与沙箱内 `/etc/hosts` 的一致性，沙箱内所有 MCP 工具挂掉；`docker compose prune` / `rm` 会删掉未被运行容器引用的镜像，也就是**全部历史版本**，回滚能力瞬间归零且不可逆。同理，**永远不要在部署机上跑 `docker system prune -a`**。
+- **修复前端镜像的构建阻塞**：`frontend/Dockerfile` 的 `COPY --from=build /app/public ./public` 在源路径不存在时会**直接让构建失败**（不是跳过、不是警告）。上一条 `Delete frontend/public directory` 把 `create-next-app` 的 5 个占位 svg 删掉、整个目录随之消失后，前端镜像就再也构建不出来。加一个 `RUN mkdir -p public` 兜住，仓库里有没有 `public/` 都能构建。
+
+> 尚未实现，脚本里是**明确的占位**（跑起来会告警，不会假装做过了）：发布前的数据库备份（阶段 5）、换版前的影子启动与观察窗（阶段 4），以及配套的 GitHub Actions / self-hosted runner。
+
 ## 2026-09-26 更新
 
 本次把整个栈容器化（一条 `docker compose up -d` 起全栈），并修掉沙箱加固暴露出来的一批真问题。
@@ -328,6 +341,7 @@ ERP-AGENT/
 │   ├── set_internal_token.sh          # 一次写入 deploy/.env 与 deploy/nginx.env
 │   ├── nginx/                         # nginx.conf + 注入共享密钥的模板
 │   ├── mock-erp/                      # 自建 FastAPI 替身（上游的 Java ERP 未开源）
+│   ├── cd/                            # 发布与回滚（deploy.sh / status.sh / lib.sh）
 │   └── cloud/                         # 整机一键部署（pack.sh + bootstrap.sh）
 │
 ├── Dockerfile                         # 后端镜像
@@ -353,6 +367,7 @@ ERP-AGENT/
 | 多租户越权 | 会话读写删不校验归属 | 一律校验归属，跨用户 403 |
 | ERP 依赖 | 指向未开源的 Java 服务，跑不起来 | `deploy/mock-erp/` 自建替身，可独立运行 |
 | grader 证据 | 只看最近 30 条消息，长任务误判编造 | 全量工具调用台账先于截断注入 |
+| 发布与回滚 | 无（手工传文件 + 重建容器） | `deploy/cd/` 一条命令发布，失败自动回滚（镜像 + 源码树 + 状态文件三方一致） |
 
 上游的开源代码本身没有密钥泄漏，本仓库也没有；**所有密码类配置一律不入库**，仓库里只有 `*.example` 模板。
 
@@ -581,6 +596,7 @@ backend 在 `AUTH_MODE=proxy` 下按它们派生 `user_id` 并校验共享密钥
 - 添加新中间件：在 `src/agent/middlewares/` 创建，在 `main_agent.py` 中间件栈中添加
 - 修改子Agent：编辑 `src/agent/subagents/configs/*.yaml`
 - 改部署拓扑 / 排查容器问题：[deploy/README.md](deploy/README.md)
+- 发布 / 回滚 / 巡检：[deploy/cd/README.md](deploy/cd/README.md)
 
 ---
 
@@ -602,6 +618,10 @@ backend 在 `AUTH_MODE=proxy` 下按它们派生 `user_id` 并校验共享密钥
 git status --short                # 上面四个文件不应出现在列表里
 git grep -nIE 'sk-[A-Za-z0-9]{20,}'   # 应当没有输出
 ```
+
+同理，**文档里也不要写真实的公网 IP / 主机名**（这个仓库是 public）：需要指代部署机时
+写「部署机」，真实地址留在不入库的 `deploy/.env` 里。这条是踩过的坑——`deploy/cd/README.md`
+曾经把生产 IP 写进了正文。
 
 ---
 
