@@ -1,0 +1,46 @@
+# auth-path job 专用的 compose 覆盖文件。**只覆盖 dind 与 sandbox-image-loader
+# 两个服务，不复制任何真实服务的定义** —— 其余全部按键继承 docker-compose.yml。
+#
+#   docker compose -f docker-compose.yml -f deploy/ci/compose.ci.yml up -d
+#
+# 为什么可以拿掉真 dind：backend 的 depends_on 里有 dind 与 sandbox-image-loader，
+# 但**代码对 dind 缺失是优雅降级的**（这不是推测，是读码确认的）：
+#   - prune_orphans() 把 get_docker_client() 整个包在 try 里，连不上就 warning
+#     并 return 0（src/agent/backends/sandbox_manager.py）
+#   - ensure_warm_pool() 只逐容器 except Exception 记 error，不向外抛
+#   - lifespan 里写明「预热失败不阻止 Web 服务启动」（src/api_view/web_main.py）
+# 所以 depends_on 是 compose 的编排顺序约束，不是代码依赖。
+#
+# 为什么要「给个占位符」而不是删掉依赖边：覆盖别人的 depends_on 需要 Compose 的
+# !reset 标签（>=2.24），而占位符在任何版本上都成立，也更直白地说明"这里故意没有
+# 真 dind"。代价是这两个服务会继承基础文件里的其余键（dind 的 privileged: true、
+# dind-data 卷、sysctls；loader 的 env_file、depends_on）—— 都是无害的：alpine 跑
+# sleep 不碰 /var/lib/docker，env_file 我们本来就要生成。**不要去 !reset 它们**，
+# 清理这点 cruft 换来的是对 Compose 版本的依赖，不划算。
+#
+# 真 dind 的验证在 stack-smoke job：那个 job 跑**完整**的 docker-compose.yml
+# （含 privileged 的真 dind）。GitHub 托管的 runner 是一次性真 VM，privileged
+# 在这里安全且可用 —— 这正是「PR 门禁只用 ubuntu-latest、自托管只跑 push」这条
+# 安全模型的兑现方式。
+
+services:
+
+  dind:
+    image: alpine:3.20
+    # 覆盖掉基础文件的 ["--storage-driver=overlay2", "--mtu=1400"]。alpine 的
+    # 入口不是 dockerd，那两个参数会被当成 alpine 自己的位置参数。
+    command: ["sleep", "infinity"]
+    # backend / sandbox-image-loader 都等 service_healthy，所以必须有健康检查。
+    # alpine 里没有 docker CLI，判据只能退化成一个"容器还活着"的常量真值。
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 1s
+      timeout: 1s
+      retries: 3
+      start_period: 0s
+
+  sandbox-image-loader:
+    image: alpine:3.20
+    # 覆盖掉基础文件的 `docker pull $SANDBOX_IMAGE`（alpine 里没有 docker CLI）。
+    # 立刻成功退出，backend 的 service_completed_successfully 才能满足。
+    command: ["true"]
