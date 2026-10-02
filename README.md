@@ -32,7 +32,27 @@
 - **两条不能碰的死线**（写在 `lib.sh` 的 `cd_compose()` 里，是代码而不是注释）：`docker compose down` 会重建网络，破坏 `mcp-sandbox` 静态 IP 与沙箱内 `/etc/hosts` 的一致性，沙箱内所有 MCP 工具挂掉；`docker compose prune` / `rm` 会删掉未被运行容器引用的镜像，也就是**全部历史版本**，回滚能力瞬间归零且不可逆。同理，**永远不要在部署机上跑 `docker system prune -a`**。
 - **修复前端镜像的构建阻塞**：`frontend/Dockerfile` 的 `COPY --from=build /app/public ./public` 在源路径不存在时会**直接让构建失败**（不是跳过、不是警告）。上一条 `Delete frontend/public directory` 把 `create-next-app` 的 5 个占位 svg 删掉、整个目录随之消失后，前端镜像就再也构建不出来。加一个 `RUN mkdir -p public` 兜住，仓库里有没有 `public/` 都能构建。
 
-> 尚未实现，脚本里是**明确的占位**（跑起来会告警，不会假装做过了）：发布前的数据库备份（阶段 5）、换版前的影子启动与观察窗（阶段 4），以及配套的 GitHub Actions / self-hosted runner。
+> 尚未实现，脚本里是**明确的占位**（跑起来会告警，不会假装做过了）：发布前的数据库备份（阶段 5）、换版前的影子启动与观察窗（阶段 4），以及部署机上的 self-hosted runner 与配套的发布流水线。**PR 门禁（GitHub Actions）已经落地**，见下。
+
+### CI 门禁：7 个 job，PR 上必过
+
+`.github/workflows/ci.yml` 调 `_gates.yml`（可复用工作流——将来的发布流水线会调**同一份**，保证「PR 上验过的」和「发布时验的」是同一套判据）。**只监听 `pull_request`**：光推分支不触发任何检查，必须开 PR。
+
+| job | 管什么 |
+|------|--------|
+| workflow 守卫 | PR 可达的 workflow 文件里不得出现自托管 runner 的标签（沿着 `uses:` 查传递闭包，不靠自觉）。唯一一条「做错了会丢机器」的规则，所以排在最前面 |
+| 密钥扫描 | `deploy/cd/leak-check.sh --tree`（路径级）+ gitleaks（内容级，**扫全历史**） |
+| Python 测试与 lint | ruff、`compileall`、6 条离线回归、pytest + 覆盖率**地板 36%**（真的会阻断） |
+| 前端类型 / lint / 测试 / 构建 | typecheck、ESLint（只拦 error）、单测、镜像构建 + 「bundle 里没有硬编码后端地址」断言 |
+| 后端镜像构建 | 顺带实测 Dockerfile 的 `PIP_INDEX_URL` ARG 挂点确实可用 |
+| 集成栈（认证与代理链路） | **真起一套栈**（dind 与 loader 换 alpine 替身），13 条断言压认证边界、nginx→backend 共享密钥链路，以及绕过 nginx 直连后端的越权尝试 |
+| 集成栈（完整拓扑，含沙箱链路） | 一个服务都不换，含 privileged 真 dind：验证 compose 起栈顺序、沙箱基础镜像灌入、backend 真的建出预热容器 |
+
+后两个 job 存在的理由：**静态检查看得见「文件里有什么」，看不见「连起来能不能用」**。它们是拿一个真实的坏版本验收过的——把 `nginx.conf` 里 `/api/` 的 `set $backend http://backend:8000;` 改成 `:9999`：语法正确、`set` 在、`proxy_pass` 在、所有 `proxy_set_header` 都在原位，静态断言一条不红，而 **7 个 job 里只有「认证与代理链路」变红**（三条断言拿到 502，诊断日志直接打出 `upstream "http://<容器 IP>:9999/api/history"`）。
+
+两条容易误判的：在上面那个坏版本下 `/healthz` 与 `/health` **仍然返回 200**（它们各自有自己的 `set`）——**探活全绿不足以说明代理链路是好的**；完整拓扑那个 job 也只探不经 `/api/` 的 `/healthz`，**它的绿同样不代表代理没事**。
+
+断言全部写在 [deploy/ci/](deploy/ci/) 的脚本里而不是 YAML 的 `run:` 块里，所以每一步都能在本地命令行重跑（这也是能快速定位问题的原因——详见 [deploy/ci/README.md](deploy/ci/README.md)）。
 
 ## 2026-09-26 更新
 
@@ -368,6 +388,7 @@ ERP-AGENT/
 | ERP 依赖 | 指向未开源的 Java 服务，跑不起来 | `deploy/mock-erp/` 自建替身，可独立运行 |
 | grader 证据 | 只看最近 30 条消息，长任务误判编造 | 全量工具调用台账先于截断注入 |
 | 发布与回滚 | 无（手工传文件 + 重建容器） | `deploy/cd/` 一条命令发布，失败自动回滚（镜像 + 源码树 + 状态文件三方一致） |
+| 质量门禁 | 无 | GitHub Actions 7 个 job：静态检查 + **真起一套栈**的集成冒烟（认证与代理链路、完整拓扑含沙箱） |
 
 上游的开源代码本身没有密钥泄漏，本仓库也没有；**所有密码类配置一律不入库**，仓库里只有 `*.example` 模板。
 
@@ -597,6 +618,7 @@ backend 在 `AUTH_MODE=proxy` 下按它们派生 `user_id` 并校验共享密钥
 - 修改子Agent：编辑 `src/agent/subagents/configs/*.yaml`
 - 改部署拓扑 / 排查容器问题：[deploy/README.md](deploy/README.md)
 - 发布 / 回滚 / 巡检：[deploy/cd/README.md](deploy/cd/README.md)
+- 改 CI 门禁 / 集成冒烟：[deploy/ci/README.md](deploy/ci/README.md)
 
 ---
 
@@ -617,6 +639,12 @@ backend 在 `AUTH_MODE=proxy` 下按它们派生 `user_id` 并校验共享密钥
 ```bash
 git status --short                # 上面四个文件不应出现在列表里
 git grep -nIE 'sk-[A-Za-z0-9]{20,}'   # 应当没有输出
+```
+
+同一条规则在 CI 上由 `secret-scan` job 强制：`leak-check.sh --tree` 查**路径**（哪些文件绝不该入库、`deploy/cd/package.filter` 有没有退化），gitleaks 查**内容与全历史**（删掉文件不等于删掉——历史里还在）。本地改完 `.gitignore` 或 `package.filter` 后先自己跑一遍：
+
+```bash
+bash deploy/cd/leak-check.sh --tree
 ```
 
 同理，**文档里也不要写真实的公网 IP / 主机名**（这个仓库是 public）：需要指代部署机时
