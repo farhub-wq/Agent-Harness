@@ -34,7 +34,12 @@ class _FakeAgentLoader:
         self._owner = owner
         self._messages = messages if messages is not None else [{"role": "user"}]
         self.get_conversations = AsyncMock(return_value=[{"thread_id": "t1"}])
-        self.get_conversation_user_id = AsyncMock(return_value=self._owner)
+        # **必须用 side_effect，不能用 return_value=self._owner。**
+        # return_value 在**构造这一刻**就把当前值固化下来了，之后再改
+        # self._owner 不会生效 —— 于是下面所有"先设 _owner 再断言"的用例
+        # 全部退化成 owner 恒为 None：期望 403 的那几个照样通过（因为 None 也
+        # 403），看着在测归属不匹配，实际一次都没走到那个分支。
+        self.get_conversation_user_id = AsyncMock(side_effect=lambda *a, **k: self._owner)
         self.get_display_messages = AsyncMock(return_value=self._messages)
         self.delete_conversation = AsyncMock(return_value=None)
 
