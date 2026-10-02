@@ -198,6 +198,128 @@ jobs:
           fi
           echo "ok：前端 bundle 里没有硬编码的后端地址（镜像与环境无关）"
 
+  # ---------------------------------------------------------------- 边缘链路
+  # 「语法没错、语义错了」的改动只有真起一套栈才发现：把 nginx 的
+  # `set $backend http://backend:8000` 改成 :9999，结构断言（test_static_config.py）
+  # 一条都不会红 —— 头都在、位置都对、语法也对 —— 但运行起来全是 502。
+  #
+  # 栈的形状：mongo + mock-erp + mcp + backend + frontend + nginx 全是真的，
+  # 只有 dind 与 sandbox-image-loader 是 alpine 替身（见 deploy/ci/compose.ci.yml，
+  # 那里解释了为什么 backend 对 dind 缺失是优雅降级的）。
+  # 真 dind 的验证在下面的 stack-smoke —— 分开是因为调 dind 会淹没认证链路的失败。
+  auth-path:
+    name: 集成栈（认证与代理链路）
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      # buildx 必须显式 setup，理由同 frontend job：默认的 `docker` driver 不支持
+      # `cache-to: type=gha`，会死在 "Cache export is not supported for the docker
+      # driver" 上。
+      - uses: docker/setup-buildx-action@v3
+
+      # 三个镜像预先构建并打成 **compose 期望的 tag**（docker-compose.yml 里写死的
+      # erp-agent-app:local / erp-agent-frontend:local / erp-mock:local），然后由
+      # compose 直接使用 —— 所以这里不能图省事用 `docker compose build`。
+      #
+      # **scope 带 `-auth` 后缀，刻意与 frontend / build-verify 两个 job 分开。**
+      # 它们与本 job 并发跑、写同一个 scope 时，GHA 的缓存写入会撞车（同一个 key
+      # 被两个 job 同时导出）。撞车通常只是警告，但也可能让构建挂掉，而那种红点
+      # 的根因离代码很远。代价只是少了「同一次运行里蹭上隔壁 job 刚写好的缓存」
+      # 这点收益（跨分支本来就取不到，GHA 缓存是按 ref 分域的）。
+      - name: 构建后端镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: erp-agent-app:local
+          build-args: |
+            PIP_INDEX_URL=https://pypi.org/simple/
+          cache-from: type=gha,scope=app-auth
+          cache-to: type=gha,scope=app-auth,mode=max
+
+      - name: 构建前端镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          load: true
+          tags: erp-agent-frontend:local
+          build-args: |
+            NPM_REGISTRY=https://registry.npmjs.org/
+          cache-from: type=gha,scope=frontend-auth
+          cache-to: type=gha,scope=frontend-auth,mode=max
+
+      - name: 构建 mock-erp 镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: ./deploy/mock-erp
+          push: false
+          load: true
+          tags: erp-mock:local
+          cache-from: type=gha,scope=mock-erp-auth
+          cache-to: type=gha,scope=mock-erp-auth,mode=max
+
+      # 早失败早说话：镜像 tag 与 compose 期望的对不上时，compose 会**回头去 build**，
+      # 于是症状变成"白等几分钟"，离根因很远。
+      - name: 确认三个镜像都在本地
+        run: |
+          docker image inspect \
+            erp-agent-app:local erp-agent-frontend:local erp-mock:local \
+            --format '{{.RepoTags}} {{.Id}}'
+
+      # 随机 Mongo 口令、假 LLM Key、以及**同一个**共享密钥写进 deploy/.env 与
+      # deploy/nginx.env —— 后者本身就是对「两处必须一致」的运行验证。
+      - name: 生成 CI 环境文件与口令
+        run: bash deploy/ci/prepare-stack.sh
+
+      # 断言全在这个脚本里，不写进 run: —— 阶段 2 的教训：真机才发现的那些问题
+      # 都是靠"脚本能在命令行单独重跑"定位的。脚本同时负责起栈与健康轮询。
+      - name: 冒烟（认证链路 + 绕过 nginx 直连 + 密钥不一致负向验证）
+        run: bash deploy/ci/smoke-edge.sh
+
+      # 失败时把栈状态与全量日志留下来。CI 上唯一能事后复盘的东西。
+      - name: 诊断信息
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auth-path-diagnostics
+          path: /tmp/erp-agent-ci-diagnostics
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------- 全栈
+  # 唯一验证 docker-compose.yml 本身的地方：起栈顺序、真 dind、沙箱基础镜像灌入、
+  # 以及 backend 真的建出预热容器。
+  #
+  # 与 auth-path 的关键差别：**不替换任何服务**。坏起来的代价是慢（dind 冷启动 +
+  # 往 dind 里拉 python:3.11-slim），换来的是拓扑从未被 CI 验证过这件事结束了。
+  #
+  # 为什么 privileged 在这里没问题：ubuntu-latest 是一次性真 VM，容器里的特权
+  # 拿不到任何持久东西，VM 用完就销毁。生产机上的自托管 runner 才是那个不能碰的
+  # —— 那条规则由 deploy/ci/lint-workflows.sh 强制，不靠自觉。
+  stack-smoke:
+    name: 集成栈（完整拓扑，含沙箱链路）
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 生成 CI 环境文件与口令
+        run: bash deploy/ci/prepare-stack.sh
+
+      - name: 起栈并验证沙箱链路
+        run: bash deploy/ci/stack-smoke.sh
+
+      - name: 诊断信息
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stack-smoke-diagnostics
+          path: /tmp/erp-agent-ci-diagnostics
+          if-no-files-found: ignore
+
   # ---------------------------------------------------------------- 后端构建
   build-verify:
     name: 后端镜像构建

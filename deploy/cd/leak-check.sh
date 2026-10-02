@@ -29,7 +29,8 @@ deploy/.env
 deploy/nginx.env
 deploy/nginx/htpasswd
 deploy/cd/state/production.env
-deploy/cd/state/production.prev.env'
+deploy/cd/state/production.prev.env
+deploy/ci/.ci-credentials.sh'
 
 # package.filter 里必须存在的排除项。排除清单是安全边界，不能靠人记得。
 # 少了任何一条 = 那个文件会被 rsync 同步进生产树。
