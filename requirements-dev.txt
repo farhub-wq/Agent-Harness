@@ -1,0 +1,11 @@
+# 开发/CI 专用的测试与 lint 依赖。
+#
+# **绝不要把这些写进 requirements.txt。** 那个文件会被
+# src/agent/backends/sandbox_setup.py 拷进沙箱容器的 /workspace/，往里面加
+# pytest / ruff 等于把测试工具链塞进用户的沙箱 —— 既是无谓的体积，也是无谓的
+# 攻击面。CI 装的是这一份，沙箱和镜像装的永远是那一份。
+-r requirements.txt
+
+pytest>=8.0
+pytest-cov>=5.0
+ruff>=0.6

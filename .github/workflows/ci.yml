@@ -1,0 +1,32 @@
+# PR 门禁。只调用 _gates.yml，不重复定义步骤 —— 将来的发布流水线调用的是
+# 同一份，所以「PR 上绿的」和「发布时验的」一定是同一套判据。
+name: ci
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  # gitleaks-action 要在 PR 上留评论
+  pull-requests: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # PR 上新的 push 会作废旧的 —— 旧的结论已经没意义了，省 runner 时间。
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    uses: ./.github/workflows/_gates.yml
+
+# 关于「为什么没有 paths-ignore」
+#
+# v1 里这里有一份 `paths-ignore: ['**.md', '.history/**', 'deploy/**/README.md']`。
+# 撤掉了，理由是它与 secret-scan 直接冲突：**文档正是密钥和真实 IP 最容易被
+# 贴进去的地方**（2026-10-02 那次历史重写清的 `deploy/cd/README.md` 里的真实
+# 服务器 IP 就是这么进去的），而 paths-ignore 会把「纯文档 PR」的全部 job 一起
+# 跳过，包括密钥扫描。用几分钟的构建时间换"文档 PR 也过一遍密钥扫描"是划算的。
+#
+# 代价是纯文档 PR 也要跑前端/后端镜像构建（约 3–6 分钟）。如果以后这个延迟
+# 真的碍事，正确的做法是**只对构建类 job 做路径判断**（job 级 if + 一个
+# changes job），而不是把整个 workflow 跳过 —— 那样会连密钥扫描一起跳过。

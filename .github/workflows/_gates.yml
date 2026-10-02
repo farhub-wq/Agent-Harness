@@ -1,0 +1,216 @@
+# 可复用的门禁集。PR（ci.yml）与将来的发布流水线**调用同一份**，保证
+# 「PR 上验过的东西」和「发布时验的东西」是同一套判据，不会各自漂移。
+#
+# 不用 workflow_run 触发下游：它有已知的触发时机与权限怪癖（拿不到 PR 的
+# secrets、chain 深度限制），reusable workflow + needs 更直白。
+#
+# 本文件**绝不能出现自托管 runner 的标签**（那个标签字面量本身也被守卫禁止，
+# 所以这里只能绕着说）—— 它被 ci.yml（pull_request 触发）引用，就在 PR 可达
+# 集合里。deploy/ci/lint-workflows.sh 会沿 uses: 检查这个传递闭包，所以这条
+# 不是靠自觉。
+#
+# 守卫用的是「剥掉注释后全文不得出现该 token」这种最笨的规则，而不是只看
+# runs-on:。笨规则无法被 `runs-on: ${{ ... }}` 这类间接写法绕过 —— 代价是
+# 注释和 step 名字里也不能出现那个词（这正是本段要绕着说的原因）。
+name: gates
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+
+  # ---------------------------------------------------------------- 守卫
+  # 放在最前面且是最便宜的 job：它是唯一一条"做错了会丢机器"的规则，
+  # 不该排在几分钟的构建后面才发现。
+  workflow-guard:
+    name: workflow 守卫
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # 这一步自己的名字里也不能出现那个标签（守卫是全文匹配，见文件头说明）。
+      - name: PR 可达的 workflow 不得使用自托管 runner
+        run: bash deploy/ci/lint-workflows.sh
+
+  # ---------------------------------------------------------------- 密钥
+  secret-scan:
+    name: 密钥扫描
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks 要扫全历史：密钥"删掉文件"不等于删掉，历史里还在。
+          # 2026-10-02 那次历史重写就是这个道理的反面教材（见 README 的
+          # 「提交前检查」一节）。
+          fetch-depth: 0
+
+      # 路径门禁：该被 .gitignore 挡的是不是真挡住了、有没有密钥被 git 跟踪、
+      # deploy/cd/package.filter 有没有漏项。
+      - name: 路径门禁
+        run: bash deploy/cd/leak-check.sh --tree
+
+      # 内容门禁：扫 key 长什么样的东西（sk-xxx、私钥块等）。与上面的路径
+      # 门禁互补 —— 那个管文件名，这个管文件内容。
+      - name: 内容与历史扫描（gitleaks）
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+  # ---------------------------------------------------------------- Python
+  python:
+    name: Python 测试与 lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"    # 与 Dockerfile 的 python:3.11-slim 对齐
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: 装依赖
+        run: python -m pip install -r requirements-dev.txt
+
+      # 首版只拦 F/E9/I，理由见 pyproject.toml。加规则之前先看统计。
+      - name: ruff
+        run: |
+          ruff check --statistics .
+          ruff check .
+
+      - name: 语法编译
+        run: python -m compileall -q src
+
+      # 这 6 条是阶段 2 之前就存在、且已逐条核对过的离线回归网。它们全都不碰
+      # 真实模型 Key、不碰 MongoDB、不碰 Docker、不碰真 ERP。
+      #
+      # 为什么不干脆让 pytest 收集它们、省一遍执行：下面的 pytest 已经覆盖了
+      # 其中 5 个模块，重复跑大约多花几十秒 —— 换来的是「pytest 的收集配置
+      # 出问题」永远不会掩盖一个真实回归。这条门禁的全部价值就是可靠，
+      # 这点冗余是划算的。
+      #
+      # 工作目录必须是仓库根：代码用 PROJECT_ROOT = __file__ 逐级 parent 解析，
+      # src/skills、requirements.txt 都靠它定位。
+      #
+      # 不需要造一份假 .env：src/ 里没有任何 os.environ[...] 硬读，全是
+      # get_env(key, default)，缺 .env 时 env_utils.load_env() 只往 stderr 打一行提示。
+      - name: 6 条离线回归
+        run: |
+          set -eux
+          python -m unittest src.test.test_hybrid_review -v
+          python -m unittest src.test.test_memory_integration -v
+          python -m src.test.test_memory_layer
+          python -m unittest src.test.test_web_search -v
+          python -m unittest src.test.test_sandbox_lifecycle -v
+          python -m unittest src.test.test_grader_transcript -v
+
+      # 收集范围由 pyproject.toml 的 addopts 控制：test_all_tools / test_mcp
+      # 在模块顶层就打真实 MCP，必须 --ignore，否则收集阶段就挂住。
+      #
+      # **这一版刻意不设 fail_under。** 先拿到真实数字，再补一个略低于它的
+      # 地板提交。拍脑袋定的地板不是形同虚设就是拦住正常提交。
+      - name: pytest + 覆盖率（仅报告）
+        run: pytest -v --cov --cov-report=term-missing
+
+  # ---------------------------------------------------------------- 前端
+  frontend:
+    name: 前端类型 / lint / 测试 / 构建
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"        # 与 frontend/Dockerfile 的 node:22-alpine 对齐
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 装依赖
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+
+      - name: 类型检查
+        working-directory: frontend
+        run: npm run typecheck
+
+      # Next 16 移除了 `next lint`，所以走 flat config（eslint.config.mjs）。
+      # 只拦 error，warning 仅展示 —— 首版就把 warning 当门禁会让流水线长期
+      # 挂在无关紧要的噪声上。
+      - name: ESLint（仅 error 阻断）
+        working-directory: frontend
+        run: npm run lint
+
+      - name: 单元测试
+        working-directory: frontend
+        run: npm run test
+
+      # **无条件构建，不做 path-filter。** 这是刻意的，不是懒：
+      # 删掉 frontend/public/（5 个 create-next-app 占位 svg）那次，Dockerfile 的
+      # `COPY --from=build /app/public ./public` 会让构建直接失败，而当时没有任何
+      # 东西拦住它 —— 直到有人手工去构建才发现。按路径过滤是"以为覆盖了"的
+      # 反面教材，而 build context 是 . 时，docker-compose.yml / Dockerfile 的
+      # 改动同样必须触发前端构建。
+      - name: 构建前端镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          load: true
+          tags: erp-agent-frontend:verify
+          build-args: |
+            NPM_REGISTRY=https://registry.npmjs.org/
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
+
+      # 回归断言：前端镜像必须与环境无关。
+      # 一旦有人给 Dockerfile 加了 NEXT_PUBLIC_* 构建参数并把后端地址烧进
+      # bundle，这里会红 —— 而不是等到某天发现镜像不能跨环境复用。
+      - name: 断言 bundle 里没有硬编码的后端地址
+        run: |
+          HITS="$(docker run --rm --entrypoint sh erp-agent-frontend:verify -c \
+            "grep -rlE 'https?://[a-zA-Z0-9.-]+:(8000|9000)' /app/.next/static /app/.next/server 2>/dev/null || true")"
+          if [ -n "$HITS" ]; then
+            echo "!! 前端 bundle 里出现了硬编码的后端绝对地址："
+            printf '%s\n' "$HITS"
+            echo
+            echo "   这破坏了「同一个前端镜像在任何环境都能用」这个前提。"
+            echo "   检查是不是有人给 frontend/Dockerfile 加了 NEXT_PUBLIC_* 的 ARG。"
+            echo "   正确解法是运行时注入配置 —— frontend/src/lib/api.ts 默认 '/api'，"
+            echo "   由 nginx 承担代理。"
+            exit 1
+          fi
+          echo "ok：前端 bundle 里没有硬编码的后端地址（镜像与环境无关）"
+
+  # ---------------------------------------------------------------- 后端构建
+  build-verify:
+    name: 后端镜像构建
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # 用官方源而不是 Dockerfile 里的阿里云默认值：runner 在境外，走官方源
+      # 更快。顺便实测了 Dockerfile 的 ARG 挂点确实可用 —— 国内部署机用默认值
+      # （阿里云）不受影响。
+      - name: 构建后端镜像（不推送）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: erp-agent-app:verify
+          build-args: |
+            PIP_INDEX_URL=https://pypi.org/simple/
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,scope=app,mode=max

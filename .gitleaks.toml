@@ -1,0 +1,51 @@
+# gitleaks 配置。CI 里由 gitleaks-action 使用（GITLEAKS_CONFIG 指向本文件）。
+#
+# 分工：本文件管**文件内容**里像不像密钥；deploy/cd/leak-check.sh 管**路径**
+#（哪些文件绝不该入库、不该被同步到服务器）。两者互补，不要互相替代。
+#
+# 语法：用的是 v8.25 起的复数形式 [[allowlists]]。
+#
+# 加一条 allowlist = 那一类东西以后不再被检查。这里的每一条都写了为什么；
+# 没有理由请不要追加。
+
+title = "erp-agent"
+
+[extend]
+useDefault = true
+
+# ---------------------------------------------------------------- 路径
+[[allowlists]]
+description = "构建产物与依赖：本地 `detect --no-git` 扫目录时会命中压缩后的随机串。这些都是 gitignore 的，不会进仓库也不会进历史，所以只影响本地直接扫目录。"
+
+paths = [
+  '''(^|/)\.venv/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)frontend/\.next/''',
+]
+
+# ---------------------------------------------------------------- 假密钥
+# 测试与文档里大量出现明显是假的值。**按内容放行而不是按路径放行**：
+# 如果按路径放行 README.md，那么哪天有人往 README 里贴一段真实 Key，
+# 恰好就被静默放过了 —— 而 README 正是最可能被贴进真东西的文件。
+[[allowlists]]
+description = "明显是占位/测试用的假密钥（见 src/test/ 与 README 的示例）"
+targetRules = ["generic-api-key", "private-key"]
+regexTarget = "match"
+regexes = [
+  '''sk-(test|fake|dummy|xxx)''',
+  '''your[-_ ]?api[-_ ]?key''',
+  '''(?i)(replace|your|example|placeholder)[-_ ]?(me|here|key|token|secret)''',
+  # 私钥块里的占位内容（真实私钥不会写 REPLACE/EXAMPLE）
+  '''BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY[\s\S]{0,200}?(REPLACE|EXAMPLE|PLACEHOLDER)''',
+  # 哈希/摘要形态的高熵串：package-lock 的 integrity、镜像 digest
+  '''sha256:[0-9a-f]{64}''',
+  '''sha256=[0-9a-f]{64}''',
+]
+
+# ---------------------------------------------------------------- 状态文件
+# deploy/cd/state/ 里存的是**镜像 digest 与 git sha**（见 deploy/cd/README.md
+# 的「状态文件」一节），不是凭据。且这些文件已被 gitignore，永远不会进历史 ——
+# 这一条只对本地 `detect --no-git` 有意义。不走 targetRules，因为它跟具体规则无关。
+[[allowlists]]
+description = "发布状态文件：记的是镜像 digest 与 git sha，不是密钥"
+paths = ['''deploy/cd/state/''']
