@@ -80,6 +80,40 @@ docker compose -f docker-compose.yml -f deploy/ci/compose.ci.yml down -v
 Basic Auth 的 `/api/history` 必须变成 401。上面那些 200 也可能是"根本没在校验"
 带来的，这一条排除那种可能。脚本用 `trap` 保证无论如何都把文件还原。
 
+## 这道门禁被验证过（2026-10-02，PR #5）
+
+不是"写完了应该能用"，是拿一个真实的坏版本实测过。样本是把
+`deploy/nginx/nginx.conf` 里 `location /api/` 的 `set $backend http://backend:8000;`
+改成 `:9999` —— 语法正确、`set` 在、`proxy_pass` 在、所有 `proxy_set_header` 都在原位。
+
+结果：**7 个 job 里只有 `auth-path` 变红，其余 6 个全绿**，包括 `stack-smoke`。
+失败点正是预期的三条：
+
+```
+FAIL  GET /api/history（带凭据，nginx 注入正确令牌）           → 期望 200，实际 502
+FAIL  GET /api/history（带凭据 + 客户端伪造内部令牌，应被覆盖）   → 期望 200，实际 502
+FAIL  GET /api/history（带凭据 + 客户端伪造身份头，应被覆盖）     → 期望 200，实际 502
+```
+
+诊断信息直接给出了根因（`ci_dump` 的 nginx 尾巴）：
+
+```
+connect() failed (111: Connection refused) while connecting to upstream,
+  request: "GET /api/history HTTP/1.1", upstream: "http://172.19.0.3:9999/api/history"
+
+```
+
+同一个 job 里那条直连探针仍然报 `no-token=401 with-token=200` —— backend 是好的，
+坏的只有代理目标。这条对照很有用：它把故障范围缩到了 nginx 这一跳。
+
+顺带记两条边界：
+
+- `/healthz`、`/health`、`/` 在这个坏版本下**仍然 200**（它们各自有自己的 `set`,
+  不受影响）。所以"探活全绿"从来不足以说明代理链路是好的 —— 这正是要按
+  location 逐个断言的原因。
+- `stack-smoke` 也放过了这个改动：它只探不经过 `/api/` 的 `/healthz`，不覆盖代理
+  路径。这是刻意的分工（见上面的分工表），代价是**别把 stack-smoke 绿当成代理没事**。
+
 ## 已经在 CI 上踩过并修掉的坑
 
 这两条都是首轮跑 CI 才暴露的，记在这里免得有人"顺手改回去"：
