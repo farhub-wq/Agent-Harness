@@ -16,7 +16,6 @@ from contextvars import ContextVar, Token
 from threading import RLock
 from typing import Any
 
-
 DEFAULT_USER_ID = "default_user"
 
 _UNBOUND = object()  # 哨兵：当前协程从未绑定过沙箱

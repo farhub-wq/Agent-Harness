@@ -1,0 +1,72 @@
+# ruff + pytest + coverage 的配置。CI 的 `python` job 读这里，本机也用同一份。
+#
+# 没有 [project] / [build-system]：这个仓库不是可安装的包（没有 setup.py、
+# 不发布到 PyPI），加进去只会让 `pip install -e .` 这种不存在的用法看起来可行。
+
+# ============================================================ ruff
+[tool.ruff]
+target-version = "py311"        # 与 Dockerfile 的 python:3.11-slim 对齐
+# 刻意不设 line-length：默认 88 即可，而下面没选 E501，所以行长根本不参与判定。
+# 设了反而给人一种"行长被管着"的错觉。
+
+[tool.ruff.lint]
+# 首版只拦这三类，理由分别是：
+#   F   —— 未使用的导入/变量、未定义的名字。**真 bug**，不是风格。
+#   E9  —— 语法错误、IOError 相关。注意 "E9" 只选 E9xx，**不含 E501 行长**。
+#   I   —— import 排序。仓库从没跑过 linter，这条最可能报一片；它被保留是因为
+#          能自动修（`ruff check --fix`），而不是因为它重要。
+#
+# 其余规则（B/SIM/UP/RUF…）一律不加：这个仓库的当务之急是**有一个能稳定变绿的
+# 门禁**，而不是一次全库重排。红的流水线等于没有流水线 —— 规则可以以后一条条加，
+# 加之前先 `ruff check --statistics` 看真实分布。
+select = ["F", "E9", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# src/test/ 下大量"导入即执行"的脚本式测试（见下面 pytest 的 ignore 说明），
+# 为了可读性常留下未使用的导入。测试代码的 F401 不值得拦。
+"src/test/**" = ["F401"]
+
+# ============================================================ pytest
+[tool.pytest.ini_options]
+testpaths = ["src/test"]
+
+# 这两个模块名字匹配 test_*.py，但它们在**模块顶层**就 asyncio.run(...) 打真实
+# MCP（127.0.0.1:9000）—— pytest 一收集就会挂住直到超时。必须显式排除。
+# 它们需要真环境，属于「集成测试」，不进 PR 门禁。
+#   src/test/test_all_tools.py
+#   src/test/test_mcp.py
+#
+# test_memory_layer.py 是自定义 runner 的脚本（不是 unittest），由 CI 里单独一条
+# `python -m src.test.test_memory_layer` 跑，所以也不进 pytest。
+# agent_test.py 名字不匹配 test_*.py，本来就不会被收集，列在这里是显式声明。
+addopts = [
+    "--ignore=src/test/test_all_tools.py",
+    "--ignore=src/test/test_mcp.py",
+    "--ignore=src/test/test_memory_layer.py",
+    "--ignore=src/test/agent_test.py",
+]
+
+# ============================================================ coverage
+[tool.coverage.run]
+source = ["src"]
+# src/test 自身不计入覆盖率 —— 否则"测试代码有没有被测试覆盖"会污染分子分母。
+omit = ["src/test/*"]
+
+[tool.coverage.report]
+# 地板设在实测值之下，不拍脑袋。2026-10-02 阶段三门禁第一次全绿时实测：
+#
+#     TOTAL   4909 语句   3113 未覆盖   37%
+#
+# **注意那个 37% 是四舍五入过的，真实值是 1796/4909 = 36.586%。**
+# 地板写 37 会当场红，虽然报告里显示的就是 37 —— 别照着显示值填。
+# 取 36：既是"略低于实测"，也留出约 0.6pp（~29 条语句）的余量。
+#
+# 这个数字是**地板不是目标**：它只用来拦住覆盖率下滑，不表示 36% 是个好水平。
+# 真要提上去，先补测试再抬这个数，不要反过来。
+fail_under = 36
+
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

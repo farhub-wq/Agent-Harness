@@ -97,7 +97,9 @@ class MemoryConfig:
 # Load .env when the optional application dependency is installed; the pure
 # memory unit tests can still run with only the standard library.
 try:
-    from .. import env_utils as _env_utils
+    # Imported for its side effect (loading .env), not for the name itself —
+    # removing it would silently stop .env from being read on this path.
+    from .. import env_utils as _env_utils  # noqa: F401
 except ModuleNotFoundError as exc:
     if exc.name != "dotenv":
         raise

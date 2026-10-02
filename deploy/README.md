@@ -178,7 +178,9 @@ backend 和 mcp 共用同一个镜像（`erp-agent-app:local`），要一起重�
 
 Agent 侧怎么知道能用：`src/agent/memory/AGENTS.md` 里让它先跑 `os.getenv("MCP_SERVER_URL")` 自己判断，为空就不要尝试。所以没配这条通路时，Agent 不会去撞墙。
 
-**改静态 IP 要同步改两处**：`docker-compose.yml` 里 mcp 的 `ipv4_address` 和 `deploy/.env` 的 `SANDBOX_MCP_HOST_IP`。
+**改静态 IP 要同步改三处**：`docker-compose.yml` 里 mcp 的 `ipv4_address`、`deploy/.env` 的 `SANDBOX_MCP_HOST_IP`、以及 `deploy/cd/lib.sh` 里 `MCP_SANDBOX_IP` 的默认值。
+
+三处漏掉任意一处，CI 的 `test_static_config.py` 会直接红，并在报错里指出是哪两处对不上 —— 这条以前只是文档，文档拦不住人。顺带那条断言还会检查这个 IP 落在 `mcp-sandbox` 的 `subnet` 内，以及整份 compose 里只有一处 `ipv4_address`。
 
 **沙箱镜像里没预装 MCP 客户端**，脚本需要自己 `pip install mcp`（装进 `/workspace/python-packages`）。这会让每次沙箱冷启动多一次几十秒的安装。要消掉就自己烘一个装了 `mcp` 的沙箱镜像，把 `SANDBOX_IMAGE` 指过去。
 

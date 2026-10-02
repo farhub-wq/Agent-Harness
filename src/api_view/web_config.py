@@ -2,8 +2,8 @@
 MongoDB 连接配置
 Motor AsyncIOMotorClient 连接.
 """
-import os
 from motor.motor_asyncio import AsyncIOMotorClient
+
 from ..agent.env_utils import get_env
 
 MONGODB_URI = get_env("MONGODB_URI", "mongodb://localhost:27017")

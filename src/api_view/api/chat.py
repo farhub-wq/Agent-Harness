@@ -10,17 +10,17 @@
 """
 import json
 import uuid
-from typing import AsyncGenerator
 from datetime import datetime
+from typing import AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from langgraph.types import Command
 
+from ...agent.log_utils import web_logger
+from ...agent.schema import ChatRequest, ResumeRequest
 from ..agent_loader import agent_loader
 from ..auth import assert_thread_owner, current_user_id, resolve_user_id
-from ...agent.schema import ChatRequest, ResumeRequest
-from ...agent.log_utils import web_logger
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 

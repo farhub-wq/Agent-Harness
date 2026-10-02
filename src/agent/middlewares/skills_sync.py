@@ -20,11 +20,11 @@ Skill 标准结构：
 """
 import asyncio
 import hashlib
-import os
 from pathlib import Path
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, Runtime
+
 from ..log_utils import middleware_logger
 
 

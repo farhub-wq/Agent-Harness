@@ -4,7 +4,7 @@ request_order_info - 当订单必填字段缺失时，向用户请求补充信�
 """
 import json
 import re
-from typing import Optional
+
 from langchain_core.tools import tool
 from langgraph.types import interrupt
 

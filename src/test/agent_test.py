@@ -3,20 +3,21 @@
 模拟完整对话流程，验证 Agent 核心功能
 """
 import asyncio
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent.env_utils import load_env
+
 load_env()
 
 
 async def test_agent_creation():
     """测试 Agent 创建"""
     print("[1] 测试 Agent 创建...")
-    from agent.schema import ProcurementContext
     from agent.main_agent import create_main_agent
+    from agent.schema import ProcurementContext
 
     ctx = ProcurementContext(
         user_id="test-e2e",

@@ -3,6 +3,7 @@ MCP Server 配置模块
 ERP 后端地址 + MCP 监听配置
 """
 import os
+
 from dotenv import load_dotenv
 
 # 加载项目根目录 .env # 加载项目根目录 .env（MCP Server 独立运行，需要自己加载）

@@ -3,12 +3,13 @@
 逐个验证每个自定义工具的基本功能
 """
 import asyncio
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent.env_utils import load_env
+
 load_env()
 
 
@@ -70,7 +71,7 @@ async def test_subagent_loader():
 async def test_schema():
     """测试数据模型"""
     print("[5] 测试数据模型...")
-    from agent.schema import ProcurementContext, ChatRequest
+    from agent.schema import ChatRequest, ProcurementContext
 
     ctx = ProcurementContext(
         user_id="test-001",

@@ -3,11 +3,12 @@
 连续 N 次沙箱工具调用失败 → 短路 → 降级响应（避免无限重试拖垮系统）。
 """
 import time
-from typing import Any, Callable, Awaitable
+from typing import Any, Awaitable, Callable
 
+from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
-from langchain.agents.middleware import AgentMiddleware, Runtime, ToolCallRequest
+
 from ..log_utils import middleware_logger
 
 

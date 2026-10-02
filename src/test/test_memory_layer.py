@@ -27,10 +27,10 @@ from src.agent.memory import (
     MemoryItem,
     MemoryKeeper,
     episodic_ns,
+    scoring,
     semantic_ns,
 )
 from src.agent.memory import namespaces as ns
-from src.agent.memory import scoring
 from src.agent.memory.extractor import extract_preferences, summarize_episode
 
 # ---------------------------------------------------------------- 测试脚手架

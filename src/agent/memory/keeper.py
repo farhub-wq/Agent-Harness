@@ -18,8 +18,14 @@ from . import namespaces as ns
 from . import scoring
 from .config import DEFAULT_MEMORY_CONFIG, MemoryConfig
 from .types import (
-    COLD, EPISODIC, PROCEDURAL, SEMANTIC, WARM,
-    MemoryItem, new_id, now_iso,
+    COLD,
+    EPISODIC,
+    PROCEDURAL,
+    SEMANTIC,
+    WARM,
+    MemoryItem,
+    new_id,
+    now_iso,
 )
 
 # 只有这些"稳定偏好"会进语义记忆并做冲突追踪；

@@ -3,10 +3,11 @@
 ProcurementContext、UserPreferences、ChatRequest 等 Pydantic 模型
 定义整个项目中流转的数据结构。这是类型安全的保障——所有请求、响应、上下文都通过这些模型约束。
 """
-from typing import Optional, List, Literal
-from pydantic import BaseModel, Field
 from datetime import datetime
 from enum import Enum
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel, Field
 
 
 class UserPreferences(BaseModel):

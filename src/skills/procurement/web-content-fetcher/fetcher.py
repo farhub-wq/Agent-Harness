@@ -3,8 +3,8 @@ HTML转Markdown脚本 - 在沙箱内执行
 用法: python fetcher.py --url <target_url> [--output /output/content.md] [--max-length 8000]
 """
 import argparse
-import sys
 import os
+import sys
 
 try:
     import requests
@@ -92,7 +92,7 @@ def main():
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(content)
 
-        print(f"✓ 转换成功")
+        print("✓ 转换成功")
         print(f"  内容长度: {len(content)} 字符")
         print(f"  输出文件: {args.output}")
 

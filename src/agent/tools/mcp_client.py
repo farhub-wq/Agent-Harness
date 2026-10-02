@@ -10,10 +10,11 @@ MCP 工具加载模块
 import asyncio
 import time
 from typing import List
+
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-from ..config import MCP_SERVER_URL, MCP_SSE_URL
+from ..config import MCP_SSE_URL
 from ..log_utils import mcp_logger
 
 # 重试配置

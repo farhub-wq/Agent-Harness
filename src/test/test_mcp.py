@@ -3,12 +3,13 @@ MCP Server 连接测试
 验证 MCP Server 是否正常运行，所有工具是否可调用
 """
 import asyncio
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent.env_utils import load_env
+
 load_env()
 
 

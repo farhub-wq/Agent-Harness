@@ -3,7 +3,9 @@
 supplier_query / supplier_page / supplier_get
 """
 import json
+
 from fastmcp import FastMCP
+
 from ..http_base import erp_client
 
 

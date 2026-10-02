@@ -1,0 +1,26 @@
+# 换行符：部署到 Linux 的东西必须是 LF。
+#
+# 为什么需要这个文件（v2 的理由与 v1 不同）：
+# 阶段 2 起，源码树是用 `git archive <sha>` 取出来的（见 deploy/cd/README.md），
+# blob 里本来就是 LF，所以发布路径**不依赖**本文件。留着它是为了挡住另一种
+# 情况：在一台没配 core.autocrlf 的机器上提交，会把 CRLF 直接写进 blob，
+# 而 git archive 会忠实地把这份 CRLF 送到 Linux —— 症状是
+#   bash: deploy/cd/deploy.sh: /usr/bin/env: bad interpreter: No such file
+# 或者 `\r: command not found`，与代码毫无关系，很难往换行符上想。
+#
+# 范围刻意收窄到「送到 Linux 会被执行或被 shell/nginx 解析」的扩展名。
+# 不要写成 `* text=auto eol=lf`：前端 .tsx/.md/.json 目前在工作树里是 CRLF，
+# 纳入进来会触发一次全库重规范化，diff 噪音远大于收益（那几类文件在 Linux 上
+# 不被执行，CRLF 无害）。
+
+*.sh                       text eol=lf
+*.yml                      text eol=lf
+# 刻意不写 *.yaml：src/agent 下 3 个 yaml 目前是 CRLF，而它们是 PyYAML 读的
+# （CRLF 无害），纳入进来只会产生一次无意义的整文件 diff。
+*.conf                     text eol=lf
+*.template                 text eol=lf
+Dockerfile                 text eol=lf
+deploy/.env.example        text eol=lf
+deploy/nginx.env.example   text eol=lf
+deploy/cd/package.filter   text eol=lf
+.gitattributes             text eol=lf
