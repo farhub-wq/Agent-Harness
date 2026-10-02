@@ -115,9 +115,10 @@ jobs:
       # 收集范围由 pyproject.toml 的 addopts 控制：test_all_tools / test_mcp
       # 在模块顶层就打真实 MCP，必须 --ignore，否则收集阶段就挂住。
       #
-      # **这一版刻意不设 fail_under。** 先拿到真实数字，再补一个略低于它的
-      # 地板提交。拍脑袋定的地板不是形同虚设就是拦住正常提交。
-      - name: pytest + 覆盖率（仅报告）
+      # 地板已补上：pyproject.toml 的 [tool.coverage.report] fail_under = 36，
+      # 依据是 2026-10-02 实测的 1796/4909 = 36.586%（报告里显示成 37%，
+      # 照着显示值填 37 会当场红）。所以这一步现在**会阻断**，不再只是报告。
+      - name: pytest + 覆盖率（地板 36%）
         run: pytest -v --cov --cov-report=term-missing
 
   # ---------------------------------------------------------------- 前端
