@@ -1,0 +1,48 @@
+# rsync --filter="merge <本文件>" 用的规则文件，被 deploy/cd/lib.sh 的
+# cd_sync_tree() 使用。
+#
+# 语义（rsync）：
+#   - pattern   排除。配合 --delete 时这类文件在目标机上**受保护，不会被删**。
+#   + pattern   包含（用来给下面的通配排除开例外）
+#   第一条匹配的规则生效 —— 所以例外必须写在通配排除**前面**。
+#
+# 两条硬要求：
+#   1) 四个密钥文件必须排除。生产 secrets 不经过 CI 的工作目录，同步也不许覆盖。
+#   2) deploy/cd/state/ 必须排除。它是「本机当前跑的是哪一版」的真值源；被同步
+#      覆盖会让回滚指向错误的版本。
+
+# ---- 例外：这些是模板，必须进包（bootstrap.sh 靠它们生成真实文件）----
++ /.env.example
++ /deploy/.env.example
++ /deploy/nginx.env.example
+
+# ---- 密钥与凭据：永不覆盖、永不被删 ----
+- /.env
+- /.env.*
+- /deploy/.env
+- /deploy/nginx.env
+- /deploy/nginx/htpasswd
+
+# ---- 发布状态：本地真值源 ----
+- /deploy/cd/state/
+
+# ---- 版本控制与虚拟环境 ----
+- /.git/
+- /.history/
+- /.venv/
+- /venv/
+
+# ---- 构建产物 / 依赖（服务器自己 build，不需要从仓库带）----
+- /frontend/node_modules/
+- /frontend/.next/
+- /frontend/tsconfig.tsbuildinfo
+- /mongo-data/
+- /tmp/
+- /src/download/
+
+# ---- 噪声 ----
+- __pycache__/
+- *.pyc
+- *.log
+- .DS_Store
+- Thumbs.db

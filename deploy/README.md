@@ -108,6 +108,11 @@ docker compose up -d backend nginx       # env_file 在容器创建时注入，r
 
 ## 日常运维
 
+> 正式发布/回滚走 `deploy/cd/`（`deploy.sh` / `status.sh`），见
+> **[deploy/cd/README.md](cd/README.md)**。下面的手工命令适合本机调试，
+> **不要**用来给生产换版 —— 手工 `up` 会让状态文件与实际运行的镜像脱节，
+> `status.sh` 会报不一致。
+
 ```bash
 docker compose logs -f backend          # 应用日志
 docker compose restart backend          # 改完 src/skills 后必须重启（见下）
