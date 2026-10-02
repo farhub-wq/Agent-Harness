@@ -52,24 +52,27 @@ if [ ! -f "$CD_STATE_FILE" ]; then
 else
     note "$(grep -E '^(VERSION|GIT_SHA|DEPLOYED_AT|DEPLOYED_BY)=' "$CD_STATE_FILE" | tr '\n' ' ')"
 
-    # 运行中的镜像引用必须与 state 里记的一致。不一致有两种成因：有人手工
-    # `docker compose up` 换了版（绕过脚本），或自动回滚后状态没更新。
-    running="$(cd_compose ps --format '{{.Service}} {{.Image}}' 2>/dev/null \
+    # 比的是**容器实际在跑的 image ID**，不是镜像引用名。引用名会合理地不同：
+    # `init` 接管一台已经在跑的机器时状态记的是 v0，而容器仍是创建时的 :local，
+    # 两者 digest 相同 —— 方案里「发布以 digest 为准」说的就是这个。
+    running="$(cd_compose ps -q 2>/dev/null | xargs -r docker inspect \
+        --format '{{index .Config.Labels "com.docker.compose.service"}} {{.Image}}' 2>/dev/null \
         | grep -E '^(mock-erp|mcp|backend|frontend) ' | sort || true)"
     want="$( {
-        sed -n 's/^MOCK_ERP_IMAGE=/mock-erp /p' "$CD_STATE_FILE"
-        sed -n 's/^APP_IMAGE=/mcp /p'           "$CD_STATE_FILE"
-        sed -n 's/^APP_IMAGE=/backend /p'       "$CD_STATE_FILE"
-        sed -n 's/^FRONTEND_IMAGE=/frontend /p' "$CD_STATE_FILE"
+        sed -n 's/^MOCK_ERP_IMAGE_ID=/mock-erp /p' "$CD_STATE_FILE"
+        sed -n 's/^APP_IMAGE_ID=/mcp /p'           "$CD_STATE_FILE"
+        sed -n 's/^APP_IMAGE_ID=/backend /p'       "$CD_STATE_FILE"
+        sed -n 's/^FRONTEND_IMAGE_ID=/frontend /p' "$CD_STATE_FILE"
     } | sort )"
     if [ "$running" = "$want" ]; then
-        ok "四个换版服务的运行镜像与 state 一致"
+        ok "四个换版服务的运行 digest 与 state 一致"
     else
-        bad "运行中的镜像与 state 不一致 —— 有人绕过脚本手工换过版？"
+        bad "运行中的镜像 digest 与 state 不一致 —— 有人绕过脚本手工换过版？"
         diff <(printf '%s\n' "$want") <(printf '%s\n' "$running") | sed 's/^/       /' >&2 || true
     fi
 
-    # digest 校验：state 里记的 digest 必须还是本机那个 tag 指着的那个。
+    # 引用完整性：state 记的 digest 必须还是本机那个 tag 现在指着的那个
+    #（tag 可以被重新指向，digest 不能）。
     for key in APP_IMAGE:APP_IMAGE_ID FRONTEND_IMAGE:FRONTEND_IMAGE_ID MOCK_ERP_IMAGE:MOCK_ERP_IMAGE_ID; do
         ref="$(cd_state_get "$CD_STATE_FILE" "${key%%:*}" || true)"
         id="$(cd_state_get "$CD_STATE_FILE" "${key##*:}" || true)"
@@ -117,11 +120,12 @@ fi
 # ---------------------------------------------------------------- 6. 回滚能力
 echo
 echo "== 回滚能力 =="
-if bash "$CD_LIB_DIR/deploy.sh" rollback "$CD_ENV" --check >/dev/null 2>&1; then
+# 只跑一次，把它的输出留着在失败时展示（跑两次会让前置检查打两遍）。
+if check_out="$(bash "$CD_LIB_DIR/deploy.sh" rollback "$CD_ENV" --check 2>&1)"; then
     ok "回滚能力具备"
 else
     bad "回滚能力不具备 —— 现在出故障滚不回去"
-    bash "$CD_LIB_DIR/deploy.sh" rollback "$CD_ENV" --check 2>&1 | sed 's/^/       /' >&2 || true
+    printf '%s\n' "$check_out" | sed 's/^/       /'
 fi
 
 echo
