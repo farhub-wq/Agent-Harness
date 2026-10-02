@@ -7,8 +7,8 @@ import re
 import uuid
 from typing import Literal
 
-from pydantic import BaseModel, Field, ConfigDict
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, ConfigDict, Field
 
 from .log_utils import agent_logger
 
@@ -71,7 +71,7 @@ class ReviewPolicy:
         self.model = model
 
     def rule(self, state):
-        from .harness import latest_human_text, detect_task_type, should_use_grader
+        from .harness import detect_task_type, latest_human_text, should_use_grader
         messages = state.get("messages", [])
         text = latest_human_text(messages)
         options = self.config.get("review", {})

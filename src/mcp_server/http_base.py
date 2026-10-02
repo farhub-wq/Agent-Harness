@@ -2,10 +2,12 @@
 HTTP 基础客户端模块
 httpx AsyncClient 单例（连接池、超时），封装 GET/POST/PUT/PATCH/DELETE
 """
-import httpx
 import json
-from typing import Any, Optional
-from .server_config import ERP_BASE_URL, HTTP_TIMEOUT, HTTP_MAX_CONNECTIONS
+from typing import Optional
+
+import httpx
+
+from .server_config import ERP_BASE_URL, HTTP_MAX_CONNECTIONS, HTTP_TIMEOUT
 
 
 class ERPHttpClient:

@@ -5,10 +5,9 @@
 import argparse
 import os
 import sys
-import zipfile
 import tempfile
 import urllib.request
-import shutil
+import zipfile
 
 
 def download_and_extract(url: str, target_dir: str) -> str:

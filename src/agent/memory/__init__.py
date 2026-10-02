@@ -19,8 +19,14 @@ from .namespaces import (
     type_ns,
 )
 from .types import (
-    COLD, EPISODIC, HOT, PROCEDURAL, SEMANTIC, WARM,
-    MEMORY_TYPES, MemoryItem,
+    COLD,
+    EPISODIC,
+    HOT,
+    MEMORY_TYPES,
+    PROCEDURAL,
+    SEMANTIC,
+    WARM,
+    MemoryItem,
 )
 
 __all__ = [

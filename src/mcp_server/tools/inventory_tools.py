@@ -3,7 +3,9 @@
 inventory_warning / inventory_page / inventory_check / inventory_inbound / inventory_outbound
 """
 import json
+
 from fastmcp import FastMCP
+
 from ..http_base import erp_client
 
 

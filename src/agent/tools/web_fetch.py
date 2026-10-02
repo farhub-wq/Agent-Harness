@@ -10,16 +10,15 @@ Skill 标准结构：
     requirements.txt  # 依赖（可选）
     assets/           # 资源文件（可选）
 """
-import os
-import re
-import io
 import base64
-import zipfile
+import io
+import re
 import tarfile
-import httpx
-import shutil
-import yaml
+import zipfile
 from pathlib import Path, PurePosixPath
+
+import httpx
+import yaml
 from langchain_core.tools import tool
 
 from ..config import skills_store_namespace

@@ -2,11 +2,11 @@
 FastAPI 应用入口
 CORS 全开、路由注册、startup/shutdown 事件
 """
-import sys
-import os
 import asyncio
-from pathlib import Path
+import os
+import sys
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 # 确保项目根目录在 path 中
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -15,11 +15,6 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from .api.chat import router as chat_router
-from .api.history import router as history_router
-from .auth import current_user_id
-from .web_config import close_mongo_client
-from ..agent.log_utils import web_logger
 from ..agent.backends.sandbox_manager import sandbox_manager
 from ..agent.config import (
     AUTH_MODE,
@@ -29,6 +24,11 @@ from ..agent.config import (
     INTERNAL_AUTH_TOKEN,
     SANDBOX_MAINTENANCE_INTERVAL_SECONDS,
 )
+from ..agent.log_utils import web_logger
+from .api.chat import router as chat_router
+from .api.history import router as history_router
+from .auth import current_user_id
+from .web_config import close_mongo_client
 
 
 async def _sandbox_maintenance(stop_event: asyncio.Event) -> None:

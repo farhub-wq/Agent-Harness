@@ -11,22 +11,21 @@ Harness 核心思想：
 
 沙箱由 SandboxManager 统一管理，不直接暴露给 Agent。
 """
-import json
+from dataclasses import dataclass, field
+from pathlib import Path
+
 import docker
 from docker.types import Mount
-from pathlib import Path
-from dataclasses import dataclass, field
-from typing import Optional
 
+from ..config import (
+    ALLOW_LOCAL_SHELL_FALLBACK,
+    SANDBOX_EXECUTE_TIMEOUT_SECONDS,
+    SANDBOX_IMAGE,
+    SANDBOX_WORK_DIR,
+)
+from ..log_utils import sandbox_logger
 from .custom_opensandbox import CustomOpenSandbox
 from .docker_client import get_docker_client
-from ..log_utils import sandbox_logger
-from ..config import (
-    SANDBOX_WORK_DIR,
-    SANDBOX_IMAGE,
-    SANDBOX_EXECUTE_TIMEOUT_SECONDS,
-    ALLOW_LOCAL_SHELL_FALLBACK,
-)
 
 # 项目根目录（用于定位本地文件同步到沙箱）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent

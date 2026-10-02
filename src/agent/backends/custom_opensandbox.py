@@ -3,22 +3,24 @@ Docker 沙箱后端
 继承 deepagents BaseSandbox，通过 Docker SDK 在隔离容器中执行命令和操作文件。
 容器名: erp-sandbox（由 SandboxManager 管理）.
 """
-import docker
 import base64
 import io
 import shlex
 import tarfile
-import json
 from typing import Optional
 
-from deepagents.backends.sandbox import (
-    BaseSandbox, ExecuteResponse,
-    FileDownloadResponse, FileUploadResponse,
-)
+import docker
 from deepagents.backends import DEFAULT_EXECUTE_TIMEOUT
-from .docker_client import get_docker_client
-from ..log_utils import sandbox_logger
+from deepagents.backends.sandbox import (
+    BaseSandbox,
+    ExecuteResponse,
+    FileDownloadResponse,
+    FileUploadResponse,
+)
+
 from ..config import DOCKER_TIMEOUT_SECONDS, SANDBOX_WORK_DIR
+from ..log_utils import sandbox_logger
+from .docker_client import get_docker_client
 
 
 class CustomOpenSandbox(BaseSandbox):

@@ -15,14 +15,14 @@
 - 子Agent：4个精选中间件 + 框架内置（轻量化，聚焦子Agent任务）
 """
 from pathlib import Path
+
 from deepagents.middleware import SummarizationToolMiddleware
 
 from .middlewares.context_injection import ContextInjectionMiddleware
-from .middlewares.skills_sync import SkillsSyncMiddleware
 from .middlewares.sandbox_breaker import SandboxCircuitBreakerMiddleware
+from .middlewares.skills_sync import SkillsSyncMiddleware
 from .middlewares.tools_summarization import ToolsSummarizationMiddleware
 from .schema import ProcurementContext
-
 
 # 技能目录
 SKILLS_DIR = Path(__file__).parent.parent / "skills"

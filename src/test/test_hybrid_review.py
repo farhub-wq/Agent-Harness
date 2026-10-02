@@ -1,8 +1,9 @@
 """Real graph regression suite for routing, escalation, grading and HITL."""
 import asyncio
 import unittest
-from unittest.mock import Mock, AsyncMock
+from unittest.mock import AsyncMock, Mock
 
+from deepagents.middleware.rubric import GraderResponse
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -10,11 +11,10 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
-from deepagents.middleware.rubric import GraderResponse
 
 from src.agent.harness import HarnessPhaseMiddleware, load_harness_config
-from src.agent.review_policy import ReviewPolicy, ReviewRoute
 from src.agent.middlewares.review_gate import ReviewExecutionGate, SafeRubricMiddleware
+from src.agent.review_policy import ReviewPolicy, ReviewRoute
 
 
 class ToolModel(FakeMessagesListChatModel):

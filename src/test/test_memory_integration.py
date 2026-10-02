@@ -10,13 +10,13 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langgraph.checkpoint.memory import InMemorySaver
 
-from src.test.test_memory_layer import FakeStore, Msg
-from src.agent.memory.keeper import MemoryKeeper
-from src.agent.memory.extractor import extract_preferences
 from src.agent.memory.config import MemoryConfig
+from src.agent.memory.extractor import extract_preferences
+from src.agent.memory.keeper import MemoryKeeper
 from src.agent.middlewares.memory_consolidation import MemoryConsolidationMiddleware
 from src.agent.middlewares.memory_update import MemoryUpdateMiddleware
-from src.agent.middlewares.warm_memory import WarmMemoryMiddleware, WARM_MEMORY_SLOT
+from src.agent.middlewares.warm_memory import WARM_MEMORY_SLOT, WarmMemoryMiddleware
+from src.test.test_memory_layer import FakeStore, Msg
 
 
 class Capture(AgentMiddleware):

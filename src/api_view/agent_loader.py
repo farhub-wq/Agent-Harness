@@ -5,8 +5,8 @@ AgentLoader 单例
 import asyncio
 import uuid
 from dataclasses import dataclass
-from typing import Any, Optional
 from datetime import datetime
+from typing import Any, Optional
 
 from ..agent.log_utils import web_logger
 from ..agent.schema import ProcurementContext
@@ -67,11 +67,12 @@ class AgentLoader:
         web_logger.info("Initializing shared Agent resources...")
         try:
             from langgraph.checkpoint.mongodb import MongoDBSaver
-            from .mongodb_store import MongoDBStore
-            from .web_config import MONGODB_URI, MONGODB_DB_NAME
 
             # 生产级存储：MongoDB 持久化
             from pymongo import MongoClient
+
+            from .mongodb_store import MongoDBStore
+            from .web_config import MONGODB_DB_NAME, MONGODB_URI
             mongo_client = MongoClient(MONGODB_URI)
             self._checkpointer = MongoDBSaver(mongo_client)
             self._mongo_client = mongo_client

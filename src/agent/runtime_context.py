@@ -8,7 +8,6 @@ from __future__ import annotations
 from contextvars import ContextVar, Token
 from typing import Any
 
-
 _current_user_id: ContextVar[str] = ContextVar(
     "erp_agent_current_user_id", default="default_user"
 )

@@ -8,9 +8,10 @@
 - update_context() 支持运行时动态更新（新请求时调用）
 """
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from langchain.agents.middleware import AgentMiddleware, Runtime
+
 from ..log_utils import middleware_logger
 from ..schema import ProcurementContext
 

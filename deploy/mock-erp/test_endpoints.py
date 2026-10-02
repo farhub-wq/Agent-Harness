@@ -1,5 +1,4 @@
 """覆盖全部 23 个 MCP 工具端点的冒烟测试。"""
-import json
 import sys
 
 import httpx

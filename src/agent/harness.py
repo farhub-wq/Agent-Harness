@@ -21,13 +21,12 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import yaml
-from typing_extensions import NotRequired, TypedDict
-
 from langchain.agents.middleware import AgentMiddleware, Runtime
 from langchain.agents.middleware.types import AgentState, PrivateStateAttr
+from typing_extensions import NotRequired
 
-from .schema import Phase, ReviewResult, Plan, PlanStep
 from .log_utils import agent_logger
+from .schema import Phase, Plan, PlanStep, ReviewResult
 
 # DSL 配置文件路径
 HARNESS_CONFIG_PATH = Path(__file__).parent / "harness_config.yaml"

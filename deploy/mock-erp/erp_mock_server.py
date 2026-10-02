@@ -19,10 +19,9 @@ import random
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+import uvicorn
 from fastapi import Body, FastAPI, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-import uvicorn
 
 # ============================================================
 # 响应信封

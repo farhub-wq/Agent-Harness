@@ -6,10 +6,11 @@
 3. 解析 interrupt_on 配置
 4. 将 context_protocol 注入到主Agent系统提示词
 """
-import yaml  # 导入 YAML 解析库，用于读取 .yaml 配置文件
 from pathlib import Path  # 导入路径库，用于处理文件路径
-from deepagents import SubAgent  # 导入子Agent类型（用于类型注解）
+
+import yaml  # 导入 YAML 解析库，用于读取 .yaml 配置文件
 from langchain_core.tools import BaseTool  # 导入工具基类，用于类型注解
+
 from ..log_utils import agent_logger  # 导入日志工具
 
 # 配置文件目录：当前文件所在目录下的 configs 文件夹

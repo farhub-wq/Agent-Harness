@@ -2,32 +2,34 @@
 主入口：create_main_agent() + precompute_agent_context()
 DeepAgent 核心组装 — 严格遵循 Harness Engineering 架构
 """
+import fnmatch
 import io
 import tarfile
-import fnmatch
-from typing import Optional
 from pathlib import Path
+from typing import Optional
 
-from deepagents import create_deep_agent, RubricMiddleware
-from deepagents.backends import CompositeBackend, StoreBackend, LocalShellBackend
+from deepagents import create_deep_agent
+from deepagents.backends import CompositeBackend, LocalShellBackend, StoreBackend
 from langchain.agents.middleware import (
     ModelCallLimitMiddleware,
     ToolCallLimitMiddleware,
 )
 
-from .config import (
-    get_llm,
-    INTERRUPT_ON_TOOLS, skills_store_namespace,
-    MAX_MODEL_CALLS, MAX_TOOL_CALLS,
-    SANDBOX_HEALTH_CHECK_INTERVAL_SECONDS,
-    ALLOW_LOCAL_SHELL_FALLBACK,
-)
-from .schema import ProcurementContext
 from .backends.sandbox_setup import SANDBOX_TRANSFER_DIR
+from .config import (
+    ALLOW_LOCAL_SHELL_FALLBACK,
+    INTERRUPT_ON_TOOLS,
+    MAX_MODEL_CALLS,
+    MAX_TOOL_CALLS,
+    SANDBOX_HEALTH_CHECK_INTERVAL_SECONDS,
+    get_llm,
+    skills_store_namespace,
+)
 from .log_utils import agent_logger
 from .memory.config import DEFAULT_MEMORY_CONFIG
 from .memory.keeper import MemoryKeeper
 from .memory.prompts import MAIN_SYSTEM_PROMPT, MEMORY_USAGE_PROMPT
+from .schema import ProcurementContext
 
 # 项目路径
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -281,9 +283,9 @@ def create_main_agent(
     sandbox_manager_instance = None
     managed_sandbox = False
     try:
+        from .backends.sandbox_holder import set_sandbox
         from .backends.sandbox_manager import sandbox_manager
         from .backends.sandbox_proxy import SandboxBackendProxy
-        from .backends.sandbox_holder import set_sandbox
 
         raw_sandbox = sandbox_manager.get_sandbox(user_context.user_id)
         sandbox_backend = SandboxBackendProxy(raw_sandbox)
@@ -329,14 +331,14 @@ def create_main_agent(
     )
 
     # ===== 3. 加载工具 =====
-    from .tools.mcp_client import load_mcp_tools_sync
     from .tools.chart_generator import generate_chart
-    from .tools.web_search import web_search
-    from .tools.web_fetch import web_fetch, install_skill
-    from .tools.skill_management import list_user_skills
-    from .tools.hitl_tools import request_order_info
-    from .tools.download_sandbox_file import download_sandbox_file, list_sandbox_files
     from .tools.document_generator import generate_document, generate_table_report
+    from .tools.download_sandbox_file import download_sandbox_file, list_sandbox_files
+    from .tools.hitl_tools import request_order_info
+    from .tools.mcp_client import load_mcp_tools_sync
+    from .tools.skill_management import list_user_skills
+    from .tools.web_fetch import install_skill, web_fetch
+    from .tools.web_search import web_search
 
     mcp_tools = load_mcp_tools_sync()
     custom_tools = [generate_chart, web_search, web_fetch, install_skill, list_user_skills, request_order_info,
@@ -354,7 +356,11 @@ def create_main_agent(
     )
 
     # ===== 4. 加载子Agent配置 =====
-    from .subagents.loader import load_subagent_configs, resolve_subagent_tools, get_delegation_context_prompt
+    from .subagents.loader import (
+        get_delegation_context_prompt,
+        load_subagent_configs,
+        resolve_subagent_tools,
+    )
     subagent_configs = load_subagent_configs()
     subagents = resolve_subagent_tools(subagent_configs, all_tools)
     # 生成委派上下文协议（注入主 Agent 提示词）
@@ -362,19 +368,19 @@ def create_main_agent(
 
     # ===== 5. 组装中间件栈 =====
     # 自定义中间件
-    from .middlewares.sandbox_health import SandboxHealthMiddleware
-    from .middlewares.context_injection import ContextInjectionMiddleware
-    from .middlewares.skills_sync import SkillsSyncMiddleware
-    from .middlewares.user_skills_restore import UserSkillsRestoreMiddleware
-    from .middlewares.tools_summarization import ToolsSummarizationMiddleware
-    from .middlewares.memory_update import MemoryUpdateMiddleware
-    from .middlewares.memory_consolidation import MemoryConsolidationMiddleware
-    from .middlewares.warm_memory import WarmMemoryMiddleware, WARM_MEMORY_SLOT
-    from .middlewares.sandbox_breaker import SandboxCircuitBreakerMiddleware
     # Harness 阶段状态机 + 评审器（真 Harness 架构核心）
     from .harness import HarnessPhaseMiddleware, load_harness_config
-    from .middlewares.review_gate import ReviewExecutionGate, SafeRubricMiddleware
+    from .middlewares.context_injection import ContextInjectionMiddleware
     from .middlewares.grader_transcript import build_grader_messages
+    from .middlewares.memory_consolidation import MemoryConsolidationMiddleware
+    from .middlewares.memory_update import MemoryUpdateMiddleware
+    from .middlewares.review_gate import ReviewExecutionGate, SafeRubricMiddleware
+    from .middlewares.sandbox_breaker import SandboxCircuitBreakerMiddleware
+    from .middlewares.sandbox_health import SandboxHealthMiddleware
+    from .middlewares.skills_sync import SkillsSyncMiddleware
+    from .middlewares.tools_summarization import ToolsSummarizationMiddleware
+    from .middlewares.user_skills_restore import UserSkillsRestoreMiddleware
+    from .middlewares.warm_memory import WARM_MEMORY_SLOT, WarmMemoryMiddleware
 
     # 读取 Harness DSL 配置中的评审迭代上限
     _harness_config = load_harness_config()

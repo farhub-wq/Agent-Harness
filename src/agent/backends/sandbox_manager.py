@@ -20,16 +20,12 @@
 - 健康检查 + 自动重建故障容器
 - 超时回收闲置沙箱（默认 30 分钟）
 """
-import time
 import threading
 import uuid
-from typing import Dict, Optional
 from datetime import datetime, timedelta
+from typing import Dict, Optional
 from urllib.parse import urlparse
 
-from .custom_opensandbox import CustomOpenSandbox
-from .docker_client import get_docker_client
-from .sandbox_setup import SandboxConfig, create_secure_sandbox
 from ..config import (
     SANDBOX_IDLE_TIMEOUT_MINUTES,
     SANDBOX_MCP_HOST_IP,
@@ -37,6 +33,9 @@ from ..config import (
     SANDBOX_WARM_POOL_SIZE,
 )
 from ..log_utils import sandbox_logger
+from .custom_opensandbox import CustomOpenSandbox
+from .docker_client import get_docker_client
+from .sandbox_setup import SandboxConfig, create_secure_sandbox
 
 # 所有沙箱容器名共用此前缀（预热池、用户容器、旧版 create_and_setup_sandbox）。
 SANDBOX_CONTAINER_PREFIX = "erp-sandbox-"
@@ -383,8 +382,9 @@ class SandboxManager:
     def _persist_to_mongodb(self, entry: SandboxEntry):
         """将沙箱映射持久化到 MongoDB"""
         try:
-            from pymongo import MongoClient
             import os
+
+            from pymongo import MongoClient
             mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
             db_name = os.getenv("MONGODB_DB_NAME", "erp_agent")
 
@@ -405,8 +405,9 @@ class SandboxManager:
     def _restore_from_mongodb(self, user_id: str) -> Optional[CustomOpenSandbox]:
         """从 MongoDB 恢复沙箱映射"""
         try:
-            from pymongo import MongoClient
             import os
+
+            from pymongo import MongoClient
             mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
             db_name = os.getenv("MONGODB_DB_NAME", "erp_agent")
 
@@ -460,8 +461,9 @@ class SandboxManager:
     def _cleanup_mongodb_cache(self, user_id: str):
         """清理 MongoDB 中的无效缓存"""
         try:
-            from pymongo import MongoClient
             import os
+
+            from pymongo import MongoClient
             mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
             db_name = os.getenv("MONGODB_DB_NAME", "erp_agent")
 
@@ -529,8 +531,9 @@ class SandboxManager:
         工作区。
         """
         try:
-            from pymongo import MongoClient
             import os
+
+            from pymongo import MongoClient
             mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
             db_name = os.getenv("MONGODB_DB_NAME", "erp_agent")
 
