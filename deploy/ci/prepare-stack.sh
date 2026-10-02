@@ -120,7 +120,19 @@ EOF
 
 # 生产机那次教训：密钥文件曾是 644 世界可读。runner 是一次性的，但保持同样的
 # 习惯不花任何代价。
-chmod 600 "$ENV_FILE" "$NGINX_ENV_FILE" "$HTPASSWD" "$CRED_FILE"
+chmod 600 "$ENV_FILE" "$NGINX_ENV_FILE" "$CRED_FILE"
+
+# htpasswd **必须**是 644，不能跟着上面一起收紧。2026-10-02 在 CI 上实测踩到：
+# nginx 的 master 是 root，但**真正打开这个文件的 worker 进程是 nginx 用户**，
+# 600 的 root:root 文件它读不了，于是每个**带凭据**的请求都返回 500，access log
+# 里只有一行 "open() /etc/nginx/htpasswd failed (13: Permission denied)"，
+# 而 /healthz（auth_basic off）照常 200 —— 表现成"服务活着，只是所有页面都 500"，
+# 很容易往应用层查。
+#
+# 另外这文件里存的是 apr1 哈希不是明文口令（明文只在本 job 的 .ci-credentials.sh
+# 里，那个是 600），对它的可读性要求本来就低。生产机上按 deploy/README.md 生成
+# 的也是 644 —— 这里跟着它，不要"顺手加固"。
+chmod 644 "$HTPASSWD"
 
 info "$ENV_FILE / $NGINX_ENV_FILE / $HTPASSWD 已生成"
 info "Basic Auth 用户：$BASIC_USER"

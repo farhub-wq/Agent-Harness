@@ -32,8 +32,19 @@ FAILED=0
 # 这里故意让 compose 自己 build（不预建、不带 GHA 层缓存）：这个 job 的职责就是
 # 验证 docker-compose.yml 的 build 配置本身（context、build args、共享镜像
 # erp-agent-app:local 被 mcp 与 backend 复用）。慢几分钟是它的成本，不是缺陷。
-ci_log "构建镜像（compose 自己的 build 配置）"
-ci_build
+#
+# 两个 registry 参数必须**显式覆盖**：Dockerfile 里的默认值是国内源
+# （PIP_INDEX_URL 阿里云、NPM_REGISTRY npmmirror），那是给国内部署机用的；
+# runner 在境外，npmmirror 会直接 404 ——
+#   npm error 404 'electron-to-chromium@https://registry.npmmirror.com/...' is not in this registry
+# 注意 404 的是 npmmirror 自己的 tarball 路径，看起来像"包不存在"，实际是
+# 镜像站对境外 IP 的行为，很容易误判成依赖问题。
+#
+# 传 --build-arg 不算削弱这个 job：compose 的 args 挂点被真的用上，反而多验了一条。
+ci_log "构建镜像（compose 自己的 build 配置，registry 走官方源）"
+ci_build \
+    --build-arg NPM_REGISTRY=https://registry.npmjs.org/ \
+    --build-arg PIP_INDEX_URL=https://pypi.org/simple/
 
 # ---------------------------------------------------------------- 起栈
 ci_log "起栈（完整拓扑，真 dind）"

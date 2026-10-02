@@ -80,6 +80,24 @@ docker compose -f docker-compose.yml -f deploy/ci/compose.ci.yml down -v
 Basic Auth 的 `/api/history` 必须变成 401。上面那些 200 也可能是"根本没在校验"
 带来的，这一条排除那种可能。脚本用 `trap` 保证无论如何都把文件还原。
 
+## 已经在 CI 上踩过并修掉的坑
+
+这两条都是首轮跑 CI 才暴露的，记在这里免得有人"顺手改回去"：
+
+- **`deploy/nginx/htpasswd` 必须是 644，不能跟着别的密钥一起收紧到 600。**
+  nginx 的 master 是 root，但**真正打开这个文件的 worker 进程是 `nginx` 用户**，
+  600 它读不了。症状极具误导性：`/healthz`（`auth_basic off`）照常 200、无凭据
+  访问照常 401，**只有带凭据的请求全部 500**，access log 里唯一的线索是
+  `open() "/etc/nginx/htpasswd" failed (13: Permission denied)` —— 看起来像应用炸了。
+  这文件存的是 apr1 哈希不是明文口令（明文在 `.ci-credentials.sh`，那个是 600），
+  而且生产机上按 `deploy/README.md` 生成的也是 644。见 `prepare-stack.sh` 末尾。
+- **`stack-smoke` 必须显式传 `--build-arg` 换成官方源。** 这个 job 刻意让 compose
+  自己 build，于是会用到 Dockerfile 里面向国内的默认值（`NPM_REGISTRY=npmmirror`、
+  `PIP_INDEX_URL=阿里云`），而 runner 在境外——npmmirror 会返回
+  `404 'electron-to-chromium@https://registry.npmmirror.com/...' is not in this registry`。
+  404 得很像"包装不存在/依赖写错了"，其实是镜像站对境外 IP 的行为。
+  `auth-path` 没这个问题，因为它的镜像由 workflow 用 buildx 预建、本来就带了官方源参数。
+
 ## 已知风险 / 待 CI 证实的东西
 
 - **dind 拉沙箱基础镜像走的是 `deploy/dind-daemon.json` 里的 daocloud 镜像站**。

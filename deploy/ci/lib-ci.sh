@@ -78,6 +78,12 @@ ci_wait_healthy() {
 }
 
 # 诊断落盘。失败时把栈的状态与全量日志留下来 —— 这是 CI 上唯一能事后复盘的东西。
+#
+# 全量日志进 artifact，**但 nginx / backend 的尾巴同时打到 stderr**：2026-10-02
+# 排查 auth-path 那次，根因就是 nginx 错误日志里的一行
+#   open() "/etc/nginx/htpasswd" failed (13: Permission denied)
+# 而它当时只躺在 artifact 里 —— 要先下 artifact、解压、翻文件才看得到。
+# 这两行 tail 的代价可以忽略，省掉的是整轮"猜→push→等 CI"。
 ci_dump() {
     local out="${1:-/tmp/erp-agent-ci-diagnostics}"
     mkdir -p "$out"
@@ -86,6 +92,10 @@ ci_dump() {
     ci_compose logs --no-color --timestamps > "$out/logs.txt" 2>&1 || true
     ci_compose config > "$out/resolved-compose.yml" 2>&1 || true
     printf '%s\n' "$(ci_compose ps --all --format 'table {{.Service}}\t{{.State}}\t{{.Health}}' 2>&1 || true)" >&2
+    printf '\n---- nginx 日志尾部（错误通常在这里） ----\n' >&2
+    ci_compose logs --no-color --tail=40 nginx >&2 2>&1 || true
+    printf '\n---- backend 日志尾部 ----\n' >&2
+    ci_compose logs --no-color --tail=40 backend >&2 2>&1 || true
 }
 
 # 单次请求的状态码。网络层失败（连不上、超时）统一变成 000，让调用方与
