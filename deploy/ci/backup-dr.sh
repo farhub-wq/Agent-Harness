@@ -69,7 +69,18 @@ ci_mongo_js '
         .forEach(n => a.getCollection(n).drop());
     a.conversations.insertMany([{_id:"c1"},{_id:"c2"},{_id:"c3"}]);
     a.display_messages.insertMany([{_id:"m1"},{_id:"m2"},{_id:"m3"},{_id:"m4"},{_id:"m5"}]);
-    a.langgraph_store.insertMany([{_id:"s1"},{_id:"s2"}]);
+    // langgraph_store 的形状必须像**真实**文档（见 src/api_view/mongodb_store.py
+    // 顶部的格式注释）：namespace 数组 + key + value + 两个时间戳。理由不是为了
+    // 好看 —— 同一个 job 里后面会跑 migrate-e2e.sh，它执行的 0001_baseline 要在
+    // 这个集合上建 `{namespace,key}` 的**唯一**索引。种子要是像原来那样只写
+    // {_id:…}，两条文档都索引到 (null,null)，建索引直接 E11000 失败，而报错完全
+    // 指不到"是种子写错了"。（2026-10-03 实际发生过。）
+    a.langgraph_store.insertMany([
+        {_id:"memories::s1", namespace:["memories"], key:"s1", value:{n:1},
+         created_at:new Date("2026-01-01T00:00:00Z"), updated_at:new Date("2026-01-01T00:00:00Z")},
+        {_id:"memories::s2", namespace:["memories"], key:"s2", value:{n:2},
+         created_at:new Date("2026-01-01T00:00:00Z"), updated_at:new Date("2026-01-01T00:00:00Z")}
+    ]);
     a.sandbox_cache.insertMany([{_id:"k1"}]);
 
     const c = db.getSiblingDB("checkpointing_db");

@@ -84,6 +84,25 @@ ci_wait_healthy 120 || ci_die "mongo 没起来"
 before="$(ledger_rows)"
 check "$before" "0" "起点：账本为空"
 
+# 前置条件：langgraph_store 里已有的文档得能撑起一个 (namespace,key) 唯一索引 ——
+# 0001_baseline 要建的正是它。这个集合的内容是**上一个脚本**（backup-dr.sh，同一个
+# job、同一个 mongo）灌的，所以这里实际是在断言那个种子的形状。
+#
+# 为什么值得单独判一次：种子形状不对时，症状是建索引报
+#   E11000 duplicate key error ... dup key: { namespace: null, key: null }
+# 那个报错长得像「迁移写错了」或者「库里有脏数据」，而真正的原因在另一个文件的
+# 几行 JS 里。2026-10-03 这套断言第一次真跑时就撞上了这个：9 项失败里有 8 项是它
+# 的下游。把它拆成一条具名断言，下次红的时候第一行就指对了地方。
+dups="$(ci_mongo_js '
+    const c = db.getSiblingDB(process.env.MONGODB_DB_NAME).getCollection("langgraph_store");
+    const r = c.aggregate([
+        {$group: {_id: {n: "$namespace", k: "$key"}, c: {$sum: 1}}},
+        {$match: {c: {$gt: 1}}},
+        {$count: "dups"}
+    ]).toArray();
+    print(r.length ? r[0].dups : 0);' | tr -d '\r' | tail -1)"
+check "$dups" "0" "前置：langgraph_store 里没有重复的 (namespace,key)"
+
 # ---------------------------------------------------------------- status / dry-run 不写库
 ci_log "--status 与 --dry-run：只报告，不碰数据库"
 bash "$MIGRATE_SH" --dir "$MIGRATIONS_DIR" --status > "$WORK/status.log" 2>&1 \
