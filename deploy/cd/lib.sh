@@ -365,6 +365,7 @@ cd_assert_synced() {
              deploy/cd/lib.sh deploy/cd/deploy.sh deploy/cd/package.filter \
              deploy/dr/backup.sh deploy/dr/lib-dr.sh \
              deploy/dr/offsite.sh deploy/dr/ossutil-install.sh deploy/dr/migrate.sh \
+             deploy/dr/restore-drill.sh \
              deploy/monitor/patrol.sh \
              src/agent/main_agent.py; do
         [ -e "$CD_REPO_ROOT/$f" ] || missing="$missing $f"
