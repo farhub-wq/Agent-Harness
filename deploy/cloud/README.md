@@ -34,7 +34,10 @@ Northflank —— 都禁止特权容器，部署上去会在创建 dind 那一�
 
 **试用期的两个坑：**
 
-1. 到期实例会被**自动释放，数据不保留**。有价值的数据提前 `mongodump` 走。
+1. 到期实例会被**自动释放，数据不保留**。这台机器上的备份会跟着一起消失 —— 所以
+   [deploy/dr/](../dr/README.md) 的异地外推在这里不是锦上添花，而是这条链路唯一
+   的意义：它把备份推到阿里云 OSS 的一个前缀下，与这台机器是否还在无关。配一次
+   `/etc/erp-agent/backup.env`（root 0600），之后定时备份会自动带上它。
 2. 领的时候把"自动续费"的勾去掉，并设个到期提醒，否则试用结束按原价扣。
 
 ## 三、部署
@@ -116,10 +119,16 @@ docker compose restart backend            # 重启后端（沙箱不会丢，映
 docker compose down                       # 停栈（数据卷保留）
 docker compose up -d                      # 再起
 
-# 备份 Mongo
-docker compose exec -T mongo mongodump --uri="$MONGODB_URI" --archive=/tmp/dump.gz --gzip
-docker compose cp mongo:/tmp/dump.gz ./dump-$(date +%F).gz
+# 备份：**不要**手写 mongodump，用 deploy/dr 的那个
+bash deploy/dr/backup.sh
 ```
+
+**上面这行曾经是手写的 `mongodump --uri="$MONGODB_URI" --archive=…`，它是错的**：
+`MONGODB_URI` 里的库名会把 dump 限死在 `erp_agent`，而会话状态全在
+`checkpointing_db`（langgraph 的库默认值，不在任何配置里）—— 产物是好的、恢复也
+不报错，只是少了一整个库。`deploy/dr/backup.sh` 运行时枚举库、逐个 `--db` 备份、
+恢复进一次性容器逐集合比对文档数，不过就不算备份。详见
+[deploy/dr/README.md](../dr/README.md)。
 
 **改代码后更新**：本机重新 `pack.sh` → `scp` → 服务器上解压覆盖 → `docker compose up -d --build backend`。
 

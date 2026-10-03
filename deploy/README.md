@@ -108,8 +108,9 @@ docker compose up -d backend nginx       # env_file 在容器创建时注入，r
 
 ## 日常运维
 
-> 正式发布/回滚走 `deploy/cd/`（`deploy.sh` / `status.sh`），见
-> **[deploy/cd/README.md](cd/README.md)**。下面的手工命令适合本机调试，
+> 正式发布/回滚走 `deploy/cd/`（`deploy.sh` / `build.sh` / `status.sh`），由
+> GitHub Actions 经人工审批调起，见 **[deploy/cd/README.md](cd/README.md)** 与
+> **[deploy/runner/README.md](runner/README.md)**。下面的手工命令适合本机调试，
 > **不要**用来给生产换版 —— 手工 `up` 会让状态文件与实际运行的镜像脱节，
 > `status.sh` 会报不一致。
 
@@ -120,12 +121,36 @@ docker compose exec dind docker ps      # 看沙箱容器
 
 # 查看生成的下载文件
 docker run --rm -v erp-agent_download-data:/d alpine ls -l /d
-
-# 备份（只有 Mongo 需要备份）
-docker compose exec mongo mongodump --archive --gzip > backup-$(date +%F).gz
 ```
 
-`dind-data` 不需要备份：丢了之后 `_restore_from_mongodb` 会走容器不存在分支、清理缓存并重建。
+### 备份
+
+**不要手工 `mongodump`。** 用 [deploy/dr/](dr/README.md) —— 那里有能用的东西，理由
+不是洁癖，而是手工那条命令会**少备份一个库**：
+
+```bash
+bash deploy/dr/backup.sh          # 备份 → 恢复自检 → 剪枝 → 外推
+bash deploy/dr/backup.sh --list   # 看有哪些
+```
+
+这套应用用了**两个** MongoDB 库，而配置里只看得到一个：`erp_agent` 是应用自己配的
+（`MONGODB_DB_NAME`），`checkpointing_db` 是 `langgraph-checkpoint-mongodb` 的**库
+默认值** —— `src/api_view/agent_loader.py` 构造 `MongoDBSaver` 时没传 `db_name`，
+于是全部会话状态与 HITL 待审批状态都落在那里。它不出现在任何配置或代码里，所以
+「按 `MONGODB_URI` 里的库名 dump」会把会话历史整段丢掉，**而且不报任何错**。
+所以 `backup.sh` 是运行时枚举数据库的。
+
+**另外还要备份 `download-data` 卷**（本段原先写「只有 Mongo 需要备份」，是错的）。
+那是用户生成的报告文件，Mongo 里**没有**它们的索引 —— 文件名只作为文本存在于消息里。
+卷丢了，会话记录还在，但里面每个下载链接都变成死链，而且**没有任何办法重建**
+（文件是模型在沙箱里生成的）。`backup.sh` 会把它一并打包，完整清单与排错见
+[deploy/dr/README.md](dr/README.md)。
+
+`dind-data` **确实**不需要备份：丢了之后 `_restore_from_mongodb` 会走容器不存在
+分支、清理缓存并重建。
+
+生产机上的定时备份与巡检由 systemd timer 负责（`deploy/monitor/`，装一次：
+`sudo bash deploy/monitor/install-monitor.sh`），见同一份文档。
 
 ### 改了 `src/skills/` 之后
 

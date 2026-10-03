@@ -1,0 +1,45 @@
+# 从 conventional commits 生成版本号与 CHANGELOG。
+#
+# 触发点是 main 上的 push —— 没有 pull_request：这个 job 拿 contents: write，
+# 能用 GITHUB_TOKEN 建 tag、发 Release。让它对 fork PR 可达等于把写权限交给
+# 任何人。deploy/ci/lint-workflows.sh 会拦住这种改法。
+#
+# 它做两件事，**都不直接碰生产**：
+#   1. 有值得发版的提交时，开一个 "chore(main): release X.Y.Z" 的 PR（改
+#      version 相关文件 + CHANGELOG）。人 review 合并。
+#   2. 这个 PR 被合并后，在下一次 push 上用 GITHUB_TOKEN 打 vX.Y.Z tag、
+#      发 GitHub Release。tag 推送触发 build.yml。
+#
+# 所以"发版"这个动作实际是：合并 release PR → 自动打 tag → 自动构建。
+# 换不换生产仍然要人在 deploy.yml 上点一次并审批（见 deploy.yml）。
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  # release-please 需要开 PR 并更新它
+  pull-requests: write
+
+concurrency:
+  group: release-please
+  # 不能取消：release-please 是幂等的（同一状态跑两次结果一样），但中途取消
+  # 可能留下"tag 已打、Release 未发"或反过来的半截状态，之后再跑要人肉判断
+  # 该不该重来。
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: 生成/更新 release PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # 版本真值在 release-please-config.json 与 .release-please-manifest.json，
+      # 不在这个文件里 —— 三个工作流（release-please / build / deploy）对版本号
+      # 的唯一约定是 tag 形如 vX.Y.Z。
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

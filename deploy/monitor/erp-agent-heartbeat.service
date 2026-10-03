@@ -1,0 +1,16 @@
+[Unit]
+Description=erp-agent 每日心跳（死信 ping + 一条汇总通知）
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/bin/bash /root/erp-agent/deploy/monitor/patrol.sh --heartbeat
+
+# 心跳要往箱外发两个请求：死信地址（curl 10s 超时）和 webhook（notify.sh 里
+# 15s 超时）。90s 是它们的和再留一倍余量。超了就被杀掉 —— 心跳迟到没有意义，
+# 而死信那边的判据是「该来的没来」，杀掉反而更快触发它。
+TimeoutStartSec=90
+Nice=10
+IOSchedulingClass=idle

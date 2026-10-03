@@ -15,12 +15,31 @@
 
 *.sh                       text eol=lf
 *.yml                      text eol=lf
+# 这两个没有 .sh 后缀，但都会被 Linux 执行/解析，属于上面说的那一类：
+#   erp-agent-deploy  装到 /usr/local/sbin 由 bash 执行（CRLF → bad interpreter，
+#                     而且它失败的位置在生产机的 sudoers 里，最难排查）
+#   ghrunner.sudoers  由 sudo 解析（CRLF 会让规则本身失效 = 发布会提不了权）
+deploy/runner/erp-agent-deploy  text eol=lf
+*.sudoers                  text eol=lf
 # 刻意不写 *.yaml：src/agent 下 3 个 yaml 目前是 CRLF，而它们是 PyYAML 读的
 # （CRLF 无害），纳入进来只会产生一次无意义的整文件 diff。
 *.conf                     text eol=lf
 *.template                 text eol=lf
+# systemd 单元。CRLF 会让 systemd 把 `After=docker.service\r` 解析成另一个单元名，
+# 而报错只说「依赖的单元不存在」—— 排查方向离换行符很远。同一个理由已经在
+# *.conf（nginx）与 *.sudoers 上写过一遍了。
+*.service                  text eol=lf
+*.timer                    text eol=lf
 Dockerfile                 text eol=lf
 deploy/.env.example        text eol=lf
 deploy/nginx.env.example   text eol=lf
 deploy/cd/package.filter   text eol=lf
+# 迁移文件：它们的**字节**是被 sha256 记账的（deploy/dr/migrate.sh）。工作区里
+# 一旦是 CRLF，同一份迁移在不同机器上算出的哈希就不同 —— 症状是"已经应用过，
+# 但文件内容变了"，而那会直接阻住发布。
+#
+# 范围刻意写窄到 migrations/，不写 *.js：将来某个目录下的 .js 一旦被纳进来，
+# 就会触发一次和上面那段 frontend 说明同样的全库重规范化 —— 而收益只有迁移
+# 这一处，所以把路径写明比用通配更划算。
+migrations/*.js            text eol=lf
 .gitattributes             text eol=lf

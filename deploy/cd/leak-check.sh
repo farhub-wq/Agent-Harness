@@ -28,6 +28,7 @@ SECRET_PATHS='.env
 deploy/.env
 deploy/nginx.env
 deploy/nginx/htpasswd
+deploy/dr/backup.env
 deploy/cd/state/production.env
 deploy/cd/state/production.prev.env
 deploy/ci/.ci-credentials.sh'
@@ -39,6 +40,7 @@ FILTER_MUST_EXCLUDE='/.env
 /deploy/.env
 /deploy/nginx.env
 /deploy/nginx/htpasswd
+/deploy/dr/backup.env
 /deploy/cd/state/'
 
 # package.filter 里必须存在的**包含例外**。少了 deploy/.env.example，新机器上的
@@ -65,8 +67,12 @@ check_tracked() {
     local rc=0 tracked
     # tracked 就等于已经进了历史 —— 此时光删文件没用，必须清历史并轮换密钥，
     # 所以这条要报得严重一点。
+    # 这里**刻意不逐个列举文件名**，而是用「任意 .env」这条通配：原先那个
+    # `(\.env|nginx\.env|…)` 是枚举，每加一个凭据文件（阶段 5 的 backup.env 就是）
+    # 都得记着回来补一行，忘了就静默漏过 —— 而这条规则的失败方式恰恰是「什么都不说」。
+    # 通配的代价是偶尔要多写一条 .example 例外，方向是安全的。
     tracked="$(git ls-files \
-        | grep -E '(^|/)(\.env|nginx\.env|htpasswd|ca\.key|server\.key)$' \
+        | grep -E '(^|/)([^/]*\.env|htpasswd|ca\.key|server\.key)$' \
         | grep -v '\.example$' || true)"
     if [ -n "$tracked" ]; then
         warn "这些密钥/凭据文件已被 git 跟踪（已进历史；删文件不够，要清历史并轮换）："

@@ -10,6 +10,11 @@
 | `prepare-stack.sh` | 生成 `deploy/.env`、`deploy/nginx.env`、`deploy/nginx/htpasswd` 与一次性口令 |
 | `smoke-edge.sh` | `auth-path` job 的断言：认证与代理链路（HTTP 层） |
 | `stack-smoke.sh` | `stack-smoke` job 的断言：完整拓扑，含真 dind 与沙箱预热池 |
+| `backup-dr.sh` | `backup-dr` job 的断言：起一个 mongo、跑真备份、跑恢复自检、**负向用例**、保留策略 |
+| `migrate-e2e.sh` | `backup-dr` job 的断言：跑真迁移、验幂等、验内容被改 / 编号撞车会停住 |
+| `dr-logic-test.sh` | 备份链路的**纯逻辑**桩测（不需要 Docker）：清单解析、区间边界、剪枝的保护集 |
+| `migrate-logic-test.sh` | 迁移器的纯逻辑桩测：编号排序、账本比对、孤儿检测 |
+| `patrol-logic-test.sh` | 巡检的纯逻辑桩测：指纹、差异摘要、「发布在跑吗」的年龄判据 |
 
 ## 为什么断言是脚本，不是 workflow 里的 `run:`
 
@@ -34,6 +39,60 @@
 `frontend` / `build-verify` job 共用 scope 会让两个 job 同时导出同一个 cache key），
 再让 compose 用本地镜像起栈；`stack-smoke` 刻意让 compose 自己 build，因为它要
 验证的就是 compose 的 build 配置本身。
+
+## `backup-dr`：为什么备份链路也在 PR 门禁里
+
+它不构建任何镜像（只起 mongo），是这批 job 里最便宜的一个，但护住的是最贵的东西。
+理由是**备份链路失效的形态全是「看起来正常」**：
+
+- 少备份了一个库 —— `checkpointing_db` 不在任何配置里（见
+  [deploy/dr/README.md](../dr/README.md)），漏了它备份文件依然是好的、自检也是过的；
+- 自检其实什么都没比 —— 比如 `counts.tsv` 丢了导致逐集合比对那个循环一条都不跑；
+- 剪枝把要用的那份删了 —— 而它是回滚的真值源。
+
+这三件事都不会报错，只会在真需要它的那一天暴露，而那天没有第二次机会。所以负向
+用例比正向用例更重要：**一个只会说「通过」的 fail-closed 自检就是安慰剂**。
+
+## `backup-dr` 首次真跑就抓到了东西（2026-10-03）
+
+这个 job 存在的理由不是「多一道保险」，是**备份链路在本机根本跑不起来**：没有
+Docker daemon，`cd_assert_tools` 必然失败。所以它第一次执行的回报就是它自己的
+价值证明 —— 8 个 job 里只有它红，红的正是那条：
+
+```
+Invalid Options: Cannot specify different database in connection URI and command-line
+option — `erp_agent` was specified in the URI and `checkpointing_db` was specified in
+the --db option
+```
+
+`MONGODB_URI` 里带库名，备份又逐库传 `--db`，mongodump 直接拒绝。它死在**第一个
+非 URI 库**上，也就是 `checkpointing_db` —— 那条路径在真机上意味着「第一次发布
+没有备份」，而且不发布就不会暴露。修法见 `lib-dr.sh` 的 `DR_MONGO_URI_NODB_SH`
+与 `dr-logic-test.sh` 里新增的用例。
+
+**修完又红了一轮，而且是同一处手术的第二刀：**
+
+```
+error parsing uri: must have a / before the query ?
+```
+
+摘掉库名之后那个 `/` 必须留下（`mongodb://host:27017/?authSource=admin`）。
+值得记的是**桩测在这一轮之前是全绿的** —— 断言里的期望值是我照错误的理解手写的。
+这是这个 job 最该被记住的性质：桩测验证的是「代码符合我以为的规格」，规格本身
+只能由真的 `mongodump` 来判。所以每次改动 `DR_MONGO_URI_NODB_SH`，**必须等到
+这个 job 绿了才算完**，本机绿不算。
+
+同一轮里另外两个「只能等 CI 才知道」的悬案也一起有了答案，而且都是好消息：
+`stack-smoke` 在境外 runner 上通过 daocloud 镜像站拉 `python:3.11-slim` **能用**；
+`auth-path` 也绿。所以那两个 job 从这一轮起不再是「写完没跑过」。
+
+## 三个 `*-logic-test.sh`
+
+它们跑在最前面（几秒钟出结果，且不需要 Docker）。覆盖的是
+端到端用例碰不到的解析/比较路径 —— 而且巡检那条**只有在 CI 里能被自动验证**：它的
+失效方式是「几天后悄悄不再告警」和「每次发布都发一条假告警」，两者在真机上都要等好
+几天才看得出来，而后者会让人把整套通知静音掉。它们抓到过真问题（见
+`deploy/ci/patrol-logic-test.sh` 与 `dr-logic-test.sh` 的文件头）。
 
 ## 本机怎么重跑
 

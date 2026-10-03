@@ -1,0 +1,21 @@
+[Unit]
+Description=erp-agent 每日心跳
+
+[Timer]
+# 05:07 是刻意的非整点：整点是一大堆机器同时醒来的时刻，而这件事**没有任何**
+# 需要对齐的理由 —— 避开它是免费的。
+#
+# 这个钟点也刻意排在 erp-agent-backup.timer（03:17）之后：于是心跳里那句
+# 「N 项检查里 M 项失败」中的备份新鲜度是在**当天备份已经做完**的前提下报的。
+# 两个顺序对调的话，心跳会周期性地说「最新备份是昨天的」——一条由我们自己
+# 制造的、每天必来的假告警。
+OnCalendar=*-*-* 05:07:00
+# Persistent：机器在 05:07 恰好关着（重启、维护）时，开机后补发一次。心跳漏掉
+# 一整天的话，死信那边会报警，而那是**它该报的**——但如果我们只是没开机，这条
+# 误报就会教人忽略死信告警。补发把它消掉。
+Persistent=true
+AccuracySec=1min
+Unit=erp-agent-heartbeat.service
+
+[Install]
+WantedBy=timers.target

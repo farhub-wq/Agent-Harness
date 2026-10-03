@@ -1,0 +1,14 @@
+# docker-container 驱动的 buildkitd 配置，由 setup-builder.sh 用 --config 传入。
+#
+# 为什么必须配这一条（2026-10-03 真机实测）：
+#   这台机器直连 registry-1.docker.io 是 **000 / 5.2s**（不通），只有
+#   docker.m.daocloud.io 可达（401 / 0.09s，401 是 /v2/ 的正常响应）。
+#   宿主 /etc/docker/daemon.json 里配了 registry-mirrors，但那只对**宿主 daemon**
+#   生效 —— docker-container 驱动的 buildkitd 是一个独立进程，基础镜像由它自己去拉，
+#   读的是这份配置。不配的结果不是"慢"，是构建卡死在 pull node:22-alpine 上，
+#   而错误信息看起来像是网络抖动。
+#
+# 与宿主 daemon.json 的 registry-mirrors 保持同一个值。改这里也要改那里，
+# 否则「宿主能拉的镜像 buildkitd 拉不动」这种不对称很难查。
+[registry."docker.io"]
+  mirrors = ["docker.m.daocloud.io"]

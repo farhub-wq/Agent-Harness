@@ -1,0 +1,20 @@
+[Unit]
+Description=erp-agent 每日数据库备份（dump + 恢复自检 + 外推）
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Environment=CD_BACKUP_VERSION=cron
+# 发布正在进行时跳过本轮：这台机器 2 核 3.6G，而备份要起一个 512m 的一次性
+# mongo 做恢复自检，和发布抢起来会把生产挤到 OOM。见 backup.sh 里那段说明。
+Environment=CD_BACKUP_SKIP_IF_BUSY=1
+ExecStart=/bin/bash /root/erp-agent/deploy/dr/backup.sh
+
+# mongodump + 逐库恢复 + 外推。当前数据量级下实测是分钟级，5400s 是给数据长大
+# 之后留的余量 —— 备份被 systemd 从中间砍掉会留下一个半截的目录，而那个目录
+# 看起来和一份真备份没有区别（manifest.txt 还没写，但 ls 出来的东西很像）。
+TimeoutStartSec=5400
+Nice=10
+IOSchedulingClass=idle

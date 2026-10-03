@@ -23,6 +23,49 @@ CD_LOCK_FILE="${CD_LOCK_FILE:-/var/lock/erp-agent-deploy.lock}"
 # `git archive <sha> | rsync`，不依赖 GitHub 可达，也不依赖工作区是否干净。
 CD_IMAGE_REPO="${CD_IMAGE_REPO:-/srv/erp-agent.git}"
 
+# ---- 备份（阶段 5，实现在 deploy/dr/）----
+# 备份目录**刻意不在**生产树里：生产树每次发布都会被 rsync --delete 刷一遍，
+# 放在里面等于每次发布删一次备份。也刻意不在 /var/lib/docker 所在的子目录 ——
+# 它要能被单独统计空间（见 status.sh 与 patrol.sh）。
+CD_BACKUP_DIR="${CD_BACKUP_DIR:-/var/backups/erp-agent}"
+CD_BACKUP_KEEP="${CD_BACKUP_KEEP:-7}"
+# mongo 的 **服务名**（不是容器名）：备份与自检都通过 compose 找到它，
+# 这样 CI 与生产走的是同一条代码路径。
+CD_MONGO_SERVICE="${CD_MONGO_SERVICE:-mongo}"
+# 自检用的一次性容器要跑的镜像。默认按 compose 里声明的来 —— 恢复必须用
+# **不高于** dump 来源的 server 版本，写死一个版本号迟早会和 compose 漂移。
+CD_MONGO_IMAGE="${CD_MONGO_IMAGE:-mongo:6.0}"
+
+# 磁盘门槛。**一处定义**：deploy.sh 的前置检查、status.sh 的巡检、patrol.sh 的
+# 告警都读它。原先这个 8 同时写在 cd_assert_disk 的默认参数和 status.sh 的字面量
+# 里 —— 两个地方各改一次的话，会出现「前置检查说不够、巡检说够」这种互相打脸的
+# 输出，而那种输出会让人开始不信这两条检查。
+CD_DISK_MIN_GB="${CD_DISK_MIN_GB:-8}"
+
+# 备份新鲜度门槛（天）。备份在发布时做、外加每天的 erp-agent-backup.timer，
+# 所以超过这个天数说明两条路都断了 —— 那是个真问题，不是噪音。
+CD_BACKUP_MAX_AGE_DAYS="${CD_BACKUP_MAX_AGE_DAYS:-3}"
+
+# ---- 巡检（阶段 5，实现在 deploy/monitor/）----
+# 巡检状态目录。**刻意不在仓库树里**：patrol 每 10 分钟写一次，放进仓库等于每 10
+# 分钟弄脏一次工作区；而且 tree 是 rsync --delete 刷出来的，状态会跟着没。
+CD_PATROL_STATE_DIR="${CD_PATROL_STATE_DIR:-/var/lib/erp-agent}"
+# 上一次的判定结果（一组 id|OK/FAIL）。不是机密，root 0644 即可。
+CD_PATROL_LAST="${CD_PATROL_LAST:-$CD_PATROL_STATE_DIR/patrol.last}"
+# 巡检自己的锁：防手动重跑与 timer 撞车导致重复告警。**与发布锁是两把**——
+# 巡检去抢发布锁会拦住正在进行的发布，那是比漏报更糟的事。
+CD_PATROL_LOCK="${CD_PATROL_LOCK:-$CD_PATROL_STATE_DIR/patrol.lock}"
+
+# 「一次发布正在进行中」的判据阈值（秒）：pending 文件比它年轻就算发布在跑。
+# 由 cd_deploy_in_flight 用，两个调用方：巡检验它决定整轮跳过，定时备份验它决定
+# 跳过本轮（2 核 3.6G 上两个 mongodump + 两个 512m 恢复容器能把生产挤到 OOM）。
+#
+# 1200s 是实测发布耗时的十倍以上（换版 44s、回退 39s），刻意留得宽：这里宁可
+# 少报也不要误报，因为误报的表现是「发布时必来一条告警 + 一条恢复」。
+# 另一侧的边界同样重要 —— 卡住不动的 pending 超过这个岁数就不再被当成「在跑」，
+# 于是它会被巡检当成故障报出来，而那正是不该漏的那一种。
+CD_DEPLOY_INFLIGHT_GRACE="${CD_DEPLOY_INFLIGHT_GRACE:-1200}"
+
 # deploy.sh 的退出码语义。CI 靠它区分处置方式：
 #   0  成功
 #   1  前置检查失败 —— 完全没动过
@@ -32,6 +75,11 @@ CD_IMAGE_REPO="${CD_IMAGE_REPO:-/srv/erp-agent.git}"
 #   5  换版后验证失败，已自动回滚（手工 rollback 成功同样是 5）
 #   6  观察窗失败，已自动回滚
 #   7  回滚也失败   —— 服务可能是坏的，需要人立刻介入
+#   8  迁移失败     —— 完全没动过（迁移在同步源码树之前）
+#
+# 8 是**刻意**新开的一个码，而不是并进 2。2 的含义与通知文案都是「备份失败 ——
+# 多半是磁盘空间」，把迁移失败报成这个，运维会去查磁盘，而真正的原因是迁移脚本
+# 在一个新结构上碰到了老数据。一个退出码的价值全在于它把处置方向指对。
 CD_EXIT_OK=0
 CD_EXIT_PRECHECK=1
 CD_EXIT_BACKUP=2
@@ -40,6 +88,7 @@ CD_EXIT_SHADOW=4
 CD_EXIT_ROLLED_BACK=5
 CD_EXIT_SOAK_ROLLED_BACK=6
 CD_EXIT_ROLLBACK_FAILED=7
+CD_EXIT_MIGRATE=8
 
 # ---------------------------------------------------------------- 输出
 log()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -146,7 +195,7 @@ cd_assert_token_consistency() {
 }
 
 cd_assert_disk() {
-    local need_gb="${1:-8}" avail_gb
+    local need_gb="${1:-$CD_DISK_MIN_GB}" avail_gb
     avail_gb="$(df -BG --output=avail /var/lib/docker 2>/dev/null | tail -1 | tr -dc '0-9')"
     [ -n "$avail_gb" ] || { warn "读不出 /var/lib/docker 可用空间，跳过磁盘门槛"; return 0; }
     if [ "$avail_gb" -lt "$need_gb" ]; then
@@ -167,7 +216,7 @@ cd_preflight() {
     [ -f "$CD_REPO_ROOT/deploy/nginx/htpasswd" ] \
         || die "缺 deploy/nginx/htpasswd：nginx 起不来。见 deploy/README.md「创建登录账号」" "$CD_EXIT_PRECHECK"
     cd_assert_token_consistency
-    cd_assert_disk 8
+    cd_assert_disk "$CD_DISK_MIN_GB"
 }
 
 # ---------------------------------------------------------------- 发布锁
@@ -185,11 +234,18 @@ cd_lock() {
 # ---------------------------------------------------------------- 镜像坐标
 # 无 registry：镜像就在本机 docker daemon 里（构建机 == 运行机）。
 # tag 用不可变的 sha-<12>；语义化 tag（vX.Y.Z）只是给人看的标签。
+# 镜像名的**唯一**出处。build.sh（CI，构建并打 tag）和 deploy.sh（生产机，换版）
+# 必须对同一个名字达成一致 —— 不一致的表现是构建成功了但发布说"本机没有这个镜像"，
+# 两边的输出都看不出问题出在名字上。
+CD_APP_IMAGE_NAME=erp-agent-app
+CD_FRONTEND_IMAGE_NAME=erp-agent-frontend
+CD_MOCK_IMAGE_NAME=erp-mock
+
 cd_image_refs() {
     local tag="$1"
-    export APP_IMAGE="erp-agent-app:$tag"
-    export FRONTEND_IMAGE="erp-agent-frontend:$tag"
-    export MOCK_ERP_IMAGE="erp-mock:$tag"
+    export APP_IMAGE="$CD_APP_IMAGE_NAME:$tag"
+    export FRONTEND_IMAGE="$CD_FRONTEND_IMAGE_NAME:$tag"
+    export MOCK_ERP_IMAGE="$CD_MOCK_IMAGE_NAME:$tag"
 }
 
 cd_all_images() { printf '%s\n' "$APP_IMAGE" "$FRONTEND_IMAGE" "$MOCK_ERP_IMAGE"; }
@@ -307,6 +363,10 @@ cd_assert_synced() {
              deploy/.env.example deploy/nginx.env.example deploy/nginx/nginx.conf \
              deploy/nginx/templates/internal_token.conf.template \
              deploy/cd/lib.sh deploy/cd/deploy.sh deploy/cd/package.filter \
+             deploy/dr/backup.sh deploy/dr/lib-dr.sh \
+             deploy/dr/offsite.sh deploy/dr/ossutil-install.sh deploy/dr/migrate.sh \
+             deploy/dr/restore-drill.sh \
+             deploy/monitor/patrol.sh \
              src/agent/main_agent.py; do
         [ -e "$CD_REPO_ROOT/$f" ] || missing="$missing $f"
     done
@@ -370,6 +430,22 @@ cd_state_get() {
     local file="$1" key="$2"
     [ -f "$file" ] || return 1
     sed -n "s/^$key=//p" "$file" | head -1
+}
+
+# 一次发布是否**正在跑**（而不是「历史上有过一次没走完的」）。判据是 pending 文件
+# 还年轻 —— 卡住的 pending 是另一回事：那个要**报出来**，不是要躲开它。
+#
+# 两个调用方，理由不同但都需要它：
+#   patrol.sh  发布期间服务在重建、digest 天然对不上，照常判定会让每次发布都产生
+#              一条告警加一条恢复，而发布本身已经有自己的四条通知了；
+#   backup.sh  定时备份不该和一次发布抢 mongodump。
+cd_deploy_in_flight() {
+    [ -f "$CD_PENDING_FILE" ] || return 1
+    local now mtime
+    now="$(date +%s)"
+    mtime="$(stat -c '%Y' "$CD_PENDING_FILE" 2>/dev/null || echo 0)"
+    [ "$mtime" -gt 0 ] || return 1
+    [ "$(( now - mtime ))" -lt "$CD_DEPLOY_INFLIGHT_GRACE" ]
 }
 
 cd_load_state() {
@@ -456,7 +532,9 @@ cd_smoke() {
         else warn "/ 返回 $code（期望 200）"; bad=1; fi
     else
         warn "未提供 SMOKE_BASIC_USER / SMOKE_BASIC_PASSWORD，跳过认证后的冒烟："
-        warn "  前端与 /api 链路**未验证**。CI 里从 Secrets 注入这两个值。"
+        warn "  前端与 /api 链路**未验证**（探活全绿说明不了代理链路是好的）。"
+        warn "  在部署机上填 /etc/erp-agent/smoke.env —— 它由发布闸门以 root 读取，"
+        warn "  不经过 runner 的进程环境。"
     fi
     return "$bad"
 }
@@ -466,4 +544,113 @@ cd_diagnose() {
     cd_compose ps --all --format 'table {{.Service}}\t{{.State}}\t{{.Health}}' >&2 || true
     echo >&2
     cd_compose logs --tail=120 backend >&2 || true
+}
+
+# ---------------------------------------------------------------- 影子启动
+# 换版**之前**让新镜像以旁观者身份跑一遍（方案 5.5）。单副本 + 进程内状态决定了
+# 真流量切分做不到，这是这个约束下唯一有意义的 canary。
+#
+# 它存在的理由是约束 A 里那个数字：坏版本一旦走到换版，停机窗口是 ~134s
+#（compose 探测依赖失败 ~100s + 回滚 ~40s）。影子阶段拦下的故障，生产一秒都不用停。
+#
+# 为什么**不**接 sandbox 网络、不设 DOCKER_HOST、不挂 docker.sock：
+# 让第二个 backend 进程碰到 dind，它的 prune_orphans() 会无条件删掉所有
+# erp-sandbox-warm-*（见 README 架构约束 B）—— 影子启动会把生产的预热池清空，
+# 自己把自己变成一次故障。docker 不可达时那两条启动路径都是优雅降级的
+#（prune 打一行 warning 后 return 0，ensure_warm_pool 逐容器 catch），所以影子
+# 容器照常起得来，验证的也正好是"除沙箱外的一切"。
+cd_shadow() {
+    local timeout="${CD_SHADOW_TIMEOUT:-180}"
+    local name="erp-shadow-$(date +%s)-$$"
+    local net_edge="${PROJECT}_edge" net_data="${PROJECT}_data"
+    local rc=0
+
+    log "影子启动（$APP_IMAGE，旁观者身份）"
+
+    docker network inspect "$net_edge" >/dev/null 2>&1 \
+        || { warn "找不到网络 $net_edge（compose project 名变了？）"; return 1; }
+    docker network inspect "$net_data" >/dev/null 2>&1 \
+        || { warn "找不到网络 $net_data"; return 1; }
+
+    docker rm -f "$name" >/dev/null 2>&1 || true
+
+    # 先接 edge：多网络容器只有一条默认路由，指向**第一个**接入的网络。edge 不是
+    # internal 的，默认路由必须走它，否则影子容器出不了网、真实 LLM 那条断言必挂。
+    # environment 逐条抄 compose 里 backend 的覆盖项（那些是"容器内不可达地址"的
+    # 修正），不抄的话影子容器会去连 localhost:9000 而把 mcp 判成不可用。
+    if ! docker run -d --name "$name" \
+            --network "$net_edge" \
+            --env-file "$CD_REPO_ROOT/deploy/.env" \
+            -e MCP_SERVER_URL=http://mcp:9000 \
+            -e ERP_BASE_URL=http://mock-erp:8081 \
+            -e ALLOW_LOCAL_SHELL_FALLBACK=false \
+            -e AUTH_MODE=proxy \
+            -e CD_SHADOW_LLM="${CD_SHADOW_LLM:-1}" \
+            -v "$CD_REPO_ROOT/src/skills:/app/src/skills:ro" \
+            --tmpfs /app/src/download \
+            "$APP_IMAGE" >/dev/null; then
+        warn "影子容器起不来（docker run 失败）"
+        return 1
+    fi
+
+    if ! docker network connect "$net_data" "$name" >/dev/null 2>&1; then
+        warn "把影子容器接进 $net_data 失败"
+        docker rm -f "$name" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    # 等 /health。等的是"进程起来 + Mongo 连上"，不是"预热池建好"—— 后者在
+    # 这里必然失败且不影响健康（见上）。
+    local waited=0
+    while [ "$waited" -lt "$timeout" ]; do
+        if docker exec "$name" python -c \
+            "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3).status==200 else 1)" \
+            >/dev/null 2>&1; then
+            info "影子容器 /health 就绪（${waited}s）"
+            break
+        fi
+        sleep 3
+        waited=$((waited + 3))
+    done
+    if [ "$waited" -ge "$timeout" ]; then
+        warn "影子容器 ${timeout}s 内 /health 没到 200"
+        docker logs --tail=60 "$name" >&2 || true
+        docker rm -f "$name" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    # 探针用 docker cp 送进去再跑，而不是把断言塞成一行 python -c：阶段 2 的教训是
+    # 能单独重跑的脚本才定位得动问题，一行 -c 做不到。
+    if ! docker cp "$CD_LIB_DIR/shadow_probe.py" "$name:/tmp/shadow_probe.py" >/dev/null 2>&1; then
+        warn "把探针拷进影子容器失败"
+        docker rm -f "$name" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    docker exec "$name" python /tmp/shadow_probe.py || rc=1
+
+    if [ "$rc" -ne 0 ]; then
+        warn "影子容器日志尾部："
+        docker logs --tail=40 "$name" >&2 || true
+    fi
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    return "$rc"
+}
+
+# ---------------------------------------------------------------- 通知
+# 永远返回 0：通知发不出去不该让一次发布变成失败。webhook 从
+# /etc/erp-agent/notify.env 读（root 0600），不经过 runner 的进程环境。
+cd_notify() {
+    local event="$1"
+    shift || true
+    [ -f "$CD_LIB_DIR/notify.sh" ] || return 0
+    bash "$CD_LIB_DIR/notify.sh" \
+        --event "$event" \
+        --version "${CD_NOTIFY_VERSION:-}" \
+        --tag  "${CD_RUN_TAG:-}" \
+        --sha  "${CD_NOTIFY_SHA:-}" \
+        --exit-code "${CD_NOTIFY_EXIT:-}" \
+        --duration "${CD_DEPLOY_SECONDS:-}" \
+        "$@" >&2 || warn "通知发送失败（不影响发布结果）"
+    return 0
 }

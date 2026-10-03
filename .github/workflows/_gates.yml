@@ -198,6 +198,58 @@ jobs:
           fi
           echo "ok：前端 bundle 里没有硬编码的后端地址（镜像与环境无关）"
 
+  # ---------------------------------------------------------------- 备份与迁移
+  # 唯一验证「数据库备份真的能恢复」与「迁移真的改对了库」的地方。不构建任何
+  # 镜像（只起 mongo），所以它是这批 job 里最便宜的一个，但护住的是最贵的东西。
+  #
+  # 为什么必须进 PR 门禁：备份链路失效的形态全是「看起来正常」—— 少备份了一个
+  # 库（checkpointing_db 不在任何配置里，见 deploy/dr/backup.sh 的文件头）、
+  # 自检其实什么都没比、剪枝把要用的那份删了。迁移则是**唯一一个直接改生产库
+  # 结构**的自动步骤。这几件事都不会报错，只会在真需要它的那一天暴露，而那天
+  # 没有第二次机会。
+  backup-dr:
+    name: 备份恢复与迁移自检
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      # 先跑不依赖 Docker 的那一段：几秒钟出结果，且它覆盖的是端到端用例碰
+      # 不到的解析/比较路径（清单字段错位、区间边界、剪枝的保护集、迁移的
+      # 排序与账本比对、巡检指纹）。它抓到过真问题，见那两个脚本的文件头。
+      #
+      # 巡检那条在这里是**唯一**能被自动验证的地方：它的失效方式是「几天后悄悄
+      # 不再告警」和「每次发布都发一条假告警」，两者在真机上都要等好几天才看得出来，
+      # 而后者会让人把整套通知静音掉。
+      - name: 纯逻辑桩测（不需要 Docker）
+        run: |
+          bash deploy/ci/dr-logic-test.sh
+          bash deploy/ci/migrate-logic-test.sh
+          bash deploy/ci/patrol-logic-test.sh
+
+      # mongo 的 env_file 指向 deploy/.env，没有它 compose 起不来（口令、
+      # MONGODB_URI 都在里面）。
+      - name: 生成 CI 环境文件与口令
+        run: bash deploy/ci/prepare-stack.sh
+
+      # 断言全在脚本里，不写进 run: —— 阶段 2 的教训：能在命令行单独重跑的
+      # 断言才定位得动问题。这两个本地也能跑。
+      - name: 备份 → restore 自检 → 负向用例 → 保留策略
+        run: bash deploy/ci/backup-dr.sh
+
+      # 复用上一步起好的 mongo（同一个 job 里容器是活着的），顺序不能颠倒：
+      # 迁移测试断言的是「账本从 0 行开始」。
+      - name: 迁移 → 幂等 → 负向用例（内容被改 / 编号撞车）
+        run: bash deploy/ci/migrate-e2e.sh
+
+      - name: 诊断信息
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-dr-diagnostics
+          path: /tmp/erp-backup-dr
+          if-no-files-found: ignore
+
   # ---------------------------------------------------------------- 边缘链路
   # 「语法没错、语义错了」的改动只有真起一套栈才发现：把 nginx 的
   # `set $backend http://backend:8000` 改成 :9999，结构断言（test_static_config.py）

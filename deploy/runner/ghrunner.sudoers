@@ -1,0 +1,24 @@
+# /etc/sudoers.d/ghrunner —— 装的时候用 install -m 0440，并且必须先过 `visudo -cf`。
+#
+# ghrunner 是 self-hosted runner 的运行用户。它**在 docker 组里**，所以它其实
+# 已经等价于 root（能把宿主任意路径挂进容器）。这条提权规则不改变威胁模型 ——
+# 它改变的是**能力面**：给一个能被审计的、参数被严格校验的入口，而不是让
+# runner 的每一步都直接是 root。
+#
+# 整个安全模型的前提仍然只有一条：**这个 runner 永远不执行不可信来源的代码**。
+# 由 deploy/ci/lint-workflows.sh 强制（PR 可达的 workflow 里出现自托管标签即失败），
+# 不是靠这条 sudoers 规则。
+
+Defaults:ghrunner env_reset
+Defaults:ghrunner secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# 不允许 `sudo -E` 把自己的环境变量塞进 root 进程。生产密钥（smoke.env /
+# notify.env）由 erp-agent-deploy 自己从 /etc/erp-agent/ 读，不靠环境传递。
+Defaults:ghrunner !setenv
+Defaults:ghrunner !requiretty
+
+# 唯一一条。没有通配符，没有 NOPASSWD: ALL。
+#
+# 命令路径必须指向 root:root 0755 的那个文件。install-runner.sh 会在安装后断言
+# 它的属主与权限 —— 原因很直接：如果 ghrunner 能写这个脚本，它就能让 root
+# 执行任意命令，这条白名单就完全失效了。
+ghrunner ALL=(root) NOPASSWD: /usr/local/sbin/erp-agent-deploy

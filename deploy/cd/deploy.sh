@@ -35,27 +35,104 @@ usage() {
   DEPLOYED_BY          写进状态文件的发布者，CI 里传 github-actions
   CD_ALLOW_INFRA_CHANGE=1
       允许把 docker-compose.yml / dind-daemon.json 的改动自动应用。默认拒绝。
-  CD_SOAK_SECONDS      换版后的观察窗长度，默认 0（阶段 4 打开）
+  CD_SOAK_SECONDS      换版后的观察窗长度，**默认 300**（5 分钟）。0 = 关闭。
+  CD_SHADOW_TIMEOUT    影子容器等 /health 的上限，默认 180
+  CD_SHADOW_LLM=0      跳过影子启动里的真实 LLM 调用（默认 1，会真打一次 LLM API）
+
+通知由末尾的 EXIT trap 统一发出（deploy/cd/notify.sh），通道配置在
+/etc/erp-agent/notify.env。**通知失败不影响退出码** —— 发布结果不由它决定。
 EOF
 }
 
-# ---------------------------------------------------------------- 阶段 5 占位
+# ---------------------------------------------------------------- 备份（阶段 5）
+# 实现在 deploy/dr/backup.sh。这里只做三件事：把这一版的坐标传下去、把结论读
+# 回来、写进状态文件的 DB_DUMP / DB_DUMP_SHA256。判定逻辑（枚举了哪几个库、
+# 自检过没过）全在那边 —— 不在这里重新解释一遍，否则两处会漂。
+#
+# 失败即 exit 2，此时**生产一个字节都没动过**（备份在同步源码树之前）。
+#
+# 备份在 cd_check_infra_change 之后、prev 快照之前：这个位置让「迁移/换版把
+# 数据搞坏」这件事有东西可回退，而不是只有一份「发布前应该还在」的口头记忆。
 cd_backup() {
-    # 阶段 5 会在这里做 mongodump + restore 自检，失败 exit 2。
-    warn "备份尚未实现（阶段 5）：本次发布**没有**数据库备份。"
-    warn "  Mongo 数据如果被这次改动搞坏，只能靠人工。"
+    local dr="$CD_REPO_ROOT/deploy/dr/backup.sh"
+    if [ ! -f "$dr" ]; then
+        warn "找不到 $dr —— 这一版源码树里没有备份脚本，本次发布**没有**数据库备份。"
+        warn "  这不该发生（deploy/dr/ 不在 package.filter 的排除项里）。"
+        return 1
+    fi
+
+    # 子进程读不到我们这边的变量，坐标必须显式 export。
+    CD_BACKUP_VERSION="${CD_NOTIFY_VERSION:-unknown}"
+    CD_BACKUP_GIT_SHA="${SHA:-}"
+    export CD_BACKUP_VERSION CD_BACKUP_GIT_SHA
+
+    # 结论走文件不走 stdout：备份脚本大量输出进度，从 stdout 里挑一行是不可靠的
+    # （多一个 echo 就会解析错），而这里的解析结果要进状态文件。
+    local result rc=0
+    result="$(mktemp)"
+    export BACKUP_RESULT_FILE="$result"
+
+    log "数据库备份（含 restore 自检）"
+    bash "$dr" || rc=$?
+
+    if [ "$rc" -ne 0 ]; then
+        warn "备份失败（deploy/dr/backup.sh 退出码 $rc）—— 本次发布中止，生产未受影响"
+        rm -f "$result"
+        return 1
+    fi
+
+    CD_DB_DUMP="$(cd_state_get "$result" DB_DUMP || true)"
+    CD_DB_DUMP_SHA256="$(cd_state_get "$result" DB_DUMP_SHA256 || true)"
+    rm -f "$result"
+
+    # 脚本报成功但没给坐标 = 状态文件里会记下 DB_DUMP= 空，也就是「这次发布
+    # 没有备份」—— 正是这个阶段要消灭的那个状态。宁可在这里失败。
+    if [ -z "$CD_DB_DUMP" ] || [ -z "$CD_DB_DUMP_SHA256" ]; then
+        warn "备份脚本报了成功，但没有回传 DB_DUMP/DB_DUMP_SHA256"
+        return 1
+    fi
+    info "备份：$CD_DB_DUMP"
     return 0
 }
 
-cd_shadow() {
-    # 阶段 4 会在这里用新镜像起一次性容器做旁观者验证，失败 exit 4。
-    warn "影子启动尚未实现（阶段 4）：新镜像**没有**在换版前单独验过。"
+# ---------------------------------------------------------------- 迁移（阶段 5）
+# 实现在 deploy/dr/migrate.sh。位置是刻意的：**备份之后、同步源码树之前**。
+#
+# 为什么在同步之前：迁移失败要满足「生产一个字节都没动过」这个语义（与备份失败
+# 同级），而源码树一旦被 rsync 过，树和运行中的镜像就已经不一致了 —— 那时退回
+# 去要再 rsync 一次，中间那个窗口是发布流程里最难解释的状态。
+#
+# 为什么在备份之后：迁移是这次发布里**唯一直接改数据库结构**的一步。它之前必须
+# 已经有一份验证过能恢复的备份 —— 否则「迁移把数据改坏了」就只剩口头记忆。
+#
+# 代价：本地树这时还是**旧版**，所以迁移文件必须从新 commit 里取。这一点由
+# migrate.sh 的 --sha 承担，这里只负责把 sha 传下去。
+cd_migrate() {
+    local sha="$1"
+    local mi="$CD_REPO_ROOT/deploy/dr/migrate.sh"
+    if [ ! -f "$mi" ]; then
+        warn "找不到 $mi —— 这一版源码树里没有迁移执行器。"
+        warn "  这不该发生（deploy/dr/ 不在 package.filter 的排除项里）。"
+        return 1
+    fi
+
+    log "数据库迁移（从 $sha 取 migrations/）"
+    if ! bash "$mi" --sha "$sha"; then
+        warn "迁移失败 —— 本次发布中止，生产未受影响（退出码 $CD_EXIT_MIGRATE）"
+        warn "  数据库停在**已应用的那几个迁移**上，是已知状态；源码树与镜像都没动。"
+        warn "  排查见 migrations/README.md。"
+        return 1
+    fi
     return 0
 }
+
+# cd_shadow() 在 lib.sh 里 —— 它要起容器、要接网络，和 cd_wait_healthy / cd_smoke
+# 是同一类东西，放一起。失败返回 1，由调用方 exit 4。
 
 cd_soak() {
-    local seconds="${CD_SOAK_SECONDS:-0}"
-    [ "$seconds" -gt 0 ] || { info "观察窗关闭（CD_SOAK_SECONDS=0，阶段 4 打开）"; return 0; }
+    # 默认 5 分钟（方案 5.7）。要跳过就显式 CD_SOAK_SECONDS=0。
+    local seconds="${CD_SOAK_SECONDS:-300}"
+    [ "$seconds" -gt 0 ] || { info "观察窗关闭（CD_SOAK_SECONDS=0）"; return 0; }
     log "观察窗 ${seconds}s：每 15s 探一次 /health，并扫日志里的错误"
     local end=$((SECONDS + seconds)) code
     while [ "$SECONDS" -lt "$end" ]; do
@@ -118,11 +195,36 @@ cd_apply_and_verify() {
     return 0
 }
 
+# ---------------------------------------------------------------- 通知
+# 一个 EXIT trap 收口所有退出路径 —— 逐个 exit 点手动发通知一定会漏掉新增的那条。
+# 退出码语义因此在通知里也有了统一解释（见 lib.sh 的 CD_EXIT_*）。
+cd_deploy_exit_trap() {
+    local rc=$?
+    [ "${CD_TRAP_DONE:-0}" = "1" ] && return 0
+    CD_TRAP_DONE=1
+    CD_DEPLOY_SECONDS=$(( SECONDS - ${CD_START_SECONDS:-0} ))
+    CD_NOTIFY_EXIT="$rc"
+    case "$rc" in
+        "$CD_EXIT_OK")                cd_notify deploy_succeeded ;;
+        "$CD_EXIT_ROLLED_BACK")       cd_notify rollback_succeeded --text "换版后验证未通过，已自动回滚（回滚成功码是 5，不是 0）" ;;
+        "$CD_EXIT_SOAK_ROLLED_BACK")  cd_notify rollback_succeeded --text "观察窗未通过，已自动回滚" ;;
+        "$CD_EXIT_ROLLBACK_FAILED")   cd_notify rollback_failed --text "服务可能是坏的，**需要人立刻介入**" ;;
+        "$CD_EXIT_SHADOW")            cd_notify shadow_failed --text "新镜像没通过影子启动，**生产一秒都没停**" ;;
+        "$CD_EXIT_BACKUP")            cd_notify backup_failed ;;
+        "$CD_EXIT_MIGRATE")           cd_notify migrate_failed --text "迁移在同步源码树之前失败，生产未受影响（数据库停在已应用的迁移上，是已知状态）" ;;
+        *)                            cd_notify deploy_failed ;;
+    esac
+    return 0
+}
+
 # ---------------------------------------------------------------- deploy
 cd_action_deploy() {
     [ -n "${TAG:-}" ] || die "deploy 需要 <tag>（形如 sha-79c3c3a1b2c3，或 local）" "$CD_EXIT_PRECHECK"
     [ -n "${SHA:-}" ] || die "deploy 需要完整的 <sha>（40 位）。只有 tag 不够：还要同步那一版的源码树。" "$CD_EXIT_PRECHECK"
     CD_RUN_TAG="$TAG"
+    CD_NOTIFY_SHA="$SHA"
+    CD_START_SECONDS=$SECONDS
+    trap 'cd_deploy_exit_trap' EXIT
 
     cd_preflight
     cd_lock
@@ -133,6 +235,19 @@ cd_action_deploy() {
     cd_assert_repo_has "$SHA" || cd_fetch_repo || true
     cd_assert_repo_has "$SHA" \
         || die "裸仓库 $CD_IMAGE_REPO 里没有 $SHA，fetch 也没拿到。" "$CD_EXIT_PRECHECK"
+
+    # 语义化版本是 **commit 的属性**，不是调用方传进来的参数：release-please 打的
+    # vX.Y.Z tag 就挂在被构建的那个 commit 上，所以 `describe --exact-match` 拿到的
+    # 才是真值。取不到（手工发布、tag=local）就退回镜像 tag —— 别伪造一个版本号。
+    # --match 把候选限死在版本 tag 上，是防御性的：当前远程没有书签 tag，但开发机
+    # 上有几个（memory-*-20260917）。它们一旦被推上来又正好指向同一个 commit，
+    # describe 挑中哪个是不确定的 —— 状态文件里就会记下一个不是版本号的"版本号"。
+    # 这个字段是人打开 state 文件时唯一能读的东西，值得钉死。
+    CD_NOTIFY_VERSION="$(git -C "$CD_IMAGE_REPO" describe --tags --exact-match --match 'v[0-9]*' "$SHA" 2>/dev/null || true)"
+    [ -n "$CD_NOTIFY_VERSION" ] || CD_NOTIFY_VERSION="$TAG"
+    info "版本 $CD_NOTIFY_VERSION（镜像 tag=$TAG）"
+
+    cd_notify deploy_started
 
     local old_sha old_nginx old_version
     old_sha="$(cd_state_get "$CD_STATE_FILE" GIT_SHA || true)"
@@ -149,6 +264,8 @@ cd_action_deploy() {
         cp "$CD_STATE_FILE" "$CD_PREV_FILE"
         info "上一版已记为 $old_version（$old_sha）"
     fi
+
+    cd_migrate "$SHA" || exit "$CD_EXIT_MIGRATE"
 
     log "同步源码树到 $SHA"
     if ! cd_sync_tree "$SHA"; then
@@ -170,9 +287,13 @@ cd_action_deploy() {
 
     # pending 写在正式状态之前：中途被打断时它会留在磁盘上，巡检会告警 ——
     # 这是「发布卡在半途」唯一可靠的信号。
-    cd_write_state "$CD_PENDING_FILE" "$TAG" "$SHA" "${DEPLOYED_BY:-$(whoami)@$(hostname)}"
+    cd_write_state "$CD_PENDING_FILE" "$CD_NOTIFY_VERSION" "$SHA" "${DEPLOYED_BY:-$(whoami)@$(hostname)}"
 
-    cd_shadow || exit "$CD_EXIT_SHADOW"
+    # 影子启动：失败即止，**生产一秒都没停**（这是它存在的全部理由，见 lib.sh）。
+    if ! cd_shadow; then
+        warn "影子启动未通过 —— 中止发布，生产未受任何影响"
+        exit "$CD_EXIT_SHADOW"
+    fi
 
     cd_write_override
 
@@ -187,7 +308,7 @@ cd_action_deploy() {
         fi
         mv "$CD_PENDING_FILE" "$CD_STATE_FILE"
         cd_record_history
-        log "发布成功：$TAG（$SHA）"
+        log "发布成功：$CD_NOTIFY_VERSION（tag=$TAG sha=$SHA）"
         cd_report_state
         exit "$CD_EXIT_OK"
     fi
@@ -274,13 +395,30 @@ cd_action_rollback() {
     if [ "${CHECK_ONLY:-0}" = "1" ]; then check_only=1; fi
 
     cd_preflight
-    cd_lock
 
     if [ "$check_only" = "1" ]; then
-        # 只校验不执行：0 = 回滚能力具备，1 = 不具备。巡检 cron 用它提前发现
-        # 「回滚能力已经没了」，而不是等真出事时才发现。
+        # 只校验不执行：0 = 回滚能力具备，1 = 不具备。巡检用它提前发现「回滚能力
+        # 已经没了」，而不是等真出事时才发现。**装通知 trap 之前 return**：
+        # 巡检每 10 分钟跑一次 --check，给它发通知是刷屏。
+        #
+        # **刻意不取发布锁**（--check 这一支在 cd_lock 之前就 return 了）。这条
+        # 分支不写任何生产状态，而它的调用方是一个无人值守、每 10 分钟响一次的
+        # timer —— 让它持锁就等于让它有机会把一次刚巧撞上的真实发布打成
+        # exit 1「另一处发布/巡检正在跑」。**一个会弄挂发布的巡检比没有巡检更糟**，
+        # 因为它的故障方式恰好是「发布挂了，而原因指向监控」。
+        # 代价是它可能读到一次写到一半的状态文件（cd_write_state 是先截断再写），
+        # 那会产出一条下一轮就自愈的假告警 —— 比弄挂发布便宜得多。
         if cd_rollback_check; then exit "$CD_EXIT_OK"; else exit "$CD_EXIT_PRECHECK"; fi
     fi
+
+    cd_lock
+
+    # 手工回滚：通知里报的是"退回到哪一版"，不是当前那版。
+    CD_NOTIFY_VERSION="$(cd_state_get "$CD_PREV_FILE" VERSION || true)"
+    CD_NOTIFY_SHA="$(cd_state_get "$CD_PREV_FILE" GIT_SHA || true)"
+    CD_START_SECONDS=$SECONDS
+    trap 'cd_deploy_exit_trap' EXIT
+    cd_notify rollback_started
 
     # cd_do_rollback 自己会再校验一次（自动回滚也走那里），这里不重复。
     cd_do_rollback "$CD_EXIT_ROLLED_BACK"
@@ -310,7 +448,15 @@ cd_do_rollback() {
         cd_diagnose
         exit "$CD_EXIT_ROLLBACK_FAILED"
     fi
-    cd_assert_synced
+    # **只告警，不中止。** cd_assert_synced 判的是「同步后该有的文件都在」，它的
+    # 前提是「目标版本应该包含这些文件」—— 这条对**向前**发布成立，对回滚不成立：
+    # 这里还原的是一个**历史上真实跑过**的树，那个版本天然可能还没有后来新增的
+    # 文件（deploy/dr/ 就是阶段 5 才有的）。拿新版的清单去要求旧版，只会让一次
+    # 本来能成的回滚死在半路，而那时线上正等着它。
+    #
+    # 向前发布那条路上的同名断言保持致命：那边目标树就是本次要发的版本，缺文件
+    # 一定是 package.filter 排除多了。
+    cd_assert_synced || warn "回滚目标的树里缺上述文件 —— 那是那个版本本来就没有的（继续）"
     CD_TREE_HASH="$(cd_content_hash "$rb_sha")"
 
     local cur_nginx prev_nginx force_nginx=0
