@@ -185,11 +185,18 @@ cd_lock() {
 # ---------------------------------------------------------------- 镜像坐标
 # 无 registry：镜像就在本机 docker daemon 里（构建机 == 运行机）。
 # tag 用不可变的 sha-<12>；语义化 tag（vX.Y.Z）只是给人看的标签。
+# 镜像名的**唯一**出处。build.sh（CI，构建并打 tag）和 deploy.sh（生产机，换版）
+# 必须对同一个名字达成一致 —— 不一致的表现是构建成功了但发布说"本机没有这个镜像"，
+# 两边的输出都看不出问题出在名字上。
+CD_APP_IMAGE_NAME=erp-agent-app
+CD_FRONTEND_IMAGE_NAME=erp-agent-frontend
+CD_MOCK_IMAGE_NAME=erp-mock
+
 cd_image_refs() {
     local tag="$1"
-    export APP_IMAGE="erp-agent-app:$tag"
-    export FRONTEND_IMAGE="erp-agent-frontend:$tag"
-    export MOCK_ERP_IMAGE="erp-mock:$tag"
+    export APP_IMAGE="$CD_APP_IMAGE_NAME:$tag"
+    export FRONTEND_IMAGE="$CD_FRONTEND_IMAGE_NAME:$tag"
+    export MOCK_ERP_IMAGE="$CD_MOCK_IMAGE_NAME:$tag"
 }
 
 cd_all_images() { printf '%s\n' "$APP_IMAGE" "$FRONTEND_IMAGE" "$MOCK_ERP_IMAGE"; }
@@ -456,7 +463,9 @@ cd_smoke() {
         else warn "/ 返回 $code（期望 200）"; bad=1; fi
     else
         warn "未提供 SMOKE_BASIC_USER / SMOKE_BASIC_PASSWORD，跳过认证后的冒烟："
-        warn "  前端与 /api 链路**未验证**。CI 里从 Secrets 注入这两个值。"
+        warn "  前端与 /api 链路**未验证**（探活全绿说明不了代理链路是好的）。"
+        warn "  在部署机上填 /etc/erp-agent/smoke.env —— 它由发布闸门以 root 读取，"
+        warn "  不经过 runner 的进程环境。"
     fi
     return "$bad"
 }
@@ -466,4 +475,113 @@ cd_diagnose() {
     cd_compose ps --all --format 'table {{.Service}}\t{{.State}}\t{{.Health}}' >&2 || true
     echo >&2
     cd_compose logs --tail=120 backend >&2 || true
+}
+
+# ---------------------------------------------------------------- 影子启动
+# 换版**之前**让新镜像以旁观者身份跑一遍（方案 5.5）。单副本 + 进程内状态决定了
+# 真流量切分做不到，这是这个约束下唯一有意义的 canary。
+#
+# 它存在的理由是约束 A 里那个数字：坏版本一旦走到换版，停机窗口是 ~134s
+#（compose 探测依赖失败 ~100s + 回滚 ~40s）。影子阶段拦下的故障，生产一秒都不用停。
+#
+# 为什么**不**接 sandbox 网络、不设 DOCKER_HOST、不挂 docker.sock：
+# 让第二个 backend 进程碰到 dind，它的 prune_orphans() 会无条件删掉所有
+# erp-sandbox-warm-*（见 README 架构约束 B）—— 影子启动会把生产的预热池清空，
+# 自己把自己变成一次故障。docker 不可达时那两条启动路径都是优雅降级的
+#（prune 打一行 warning 后 return 0，ensure_warm_pool 逐容器 catch），所以影子
+# 容器照常起得来，验证的也正好是"除沙箱外的一切"。
+cd_shadow() {
+    local timeout="${CD_SHADOW_TIMEOUT:-180}"
+    local name="erp-shadow-$(date +%s)-$$"
+    local net_edge="${PROJECT}_edge" net_data="${PROJECT}_data"
+    local rc=0
+
+    log "影子启动（$APP_IMAGE，旁观者身份）"
+
+    docker network inspect "$net_edge" >/dev/null 2>&1 \
+        || { warn "找不到网络 $net_edge（compose project 名变了？）"; return 1; }
+    docker network inspect "$net_data" >/dev/null 2>&1 \
+        || { warn "找不到网络 $net_data"; return 1; }
+
+    docker rm -f "$name" >/dev/null 2>&1 || true
+
+    # 先接 edge：多网络容器只有一条默认路由，指向**第一个**接入的网络。edge 不是
+    # internal 的，默认路由必须走它，否则影子容器出不了网、真实 LLM 那条断言必挂。
+    # environment 逐条抄 compose 里 backend 的覆盖项（那些是"容器内不可达地址"的
+    # 修正），不抄的话影子容器会去连 localhost:9000 而把 mcp 判成不可用。
+    if ! docker run -d --name "$name" \
+            --network "$net_edge" \
+            --env-file "$CD_REPO_ROOT/deploy/.env" \
+            -e MCP_SERVER_URL=http://mcp:9000 \
+            -e ERP_BASE_URL=http://mock-erp:8081 \
+            -e ALLOW_LOCAL_SHELL_FALLBACK=false \
+            -e AUTH_MODE=proxy \
+            -e CD_SHADOW_LLM="${CD_SHADOW_LLM:-1}" \
+            -v "$CD_REPO_ROOT/src/skills:/app/src/skills:ro" \
+            --tmpfs /app/src/download \
+            "$APP_IMAGE" >/dev/null; then
+        warn "影子容器起不来（docker run 失败）"
+        return 1
+    fi
+
+    if ! docker network connect "$net_data" "$name" >/dev/null 2>&1; then
+        warn "把影子容器接进 $net_data 失败"
+        docker rm -f "$name" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    # 等 /health。等的是"进程起来 + Mongo 连上"，不是"预热池建好"—— 后者在
+    # 这里必然失败且不影响健康（见上）。
+    local waited=0
+    while [ "$waited" -lt "$timeout" ]; do
+        if docker exec "$name" python -c \
+            "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3).status==200 else 1)" \
+            >/dev/null 2>&1; then
+            info "影子容器 /health 就绪（${waited}s）"
+            break
+        fi
+        sleep 3
+        waited=$((waited + 3))
+    done
+    if [ "$waited" -ge "$timeout" ]; then
+        warn "影子容器 ${timeout}s 内 /health 没到 200"
+        docker logs --tail=60 "$name" >&2 || true
+        docker rm -f "$name" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    # 探针用 docker cp 送进去再跑，而不是把断言塞成一行 python -c：阶段 2 的教训是
+    # 能单独重跑的脚本才定位得动问题，一行 -c 做不到。
+    if ! docker cp "$CD_LIB_DIR/shadow_probe.py" "$name:/tmp/shadow_probe.py" >/dev/null 2>&1; then
+        warn "把探针拷进影子容器失败"
+        docker rm -f "$name" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    docker exec "$name" python /tmp/shadow_probe.py || rc=1
+
+    if [ "$rc" -ne 0 ]; then
+        warn "影子容器日志尾部："
+        docker logs --tail=40 "$name" >&2 || true
+    fi
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    return "$rc"
+}
+
+# ---------------------------------------------------------------- 通知
+# 永远返回 0：通知发不出去不该让一次发布变成失败。webhook 从
+# /etc/erp-agent/notify.env 读（root 0600），不经过 runner 的进程环境。
+cd_notify() {
+    local event="$1"
+    shift || true
+    [ -f "$CD_LIB_DIR/notify.sh" ] || return 0
+    bash "$CD_LIB_DIR/notify.sh" \
+        --event "$event" \
+        --version "${CD_NOTIFY_VERSION:-}" \
+        --tag  "${CD_RUN_TAG:-}" \
+        --sha  "${CD_NOTIFY_SHA:-}" \
+        --exit-code "${CD_NOTIFY_EXIT:-}" \
+        --duration "${CD_DEPLOY_SECONDS:-}" \
+        "$@" >&2 || warn "通知发送失败（不影响发布结果）"
+    return 0
 }

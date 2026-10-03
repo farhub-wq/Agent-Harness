@@ -35,7 +35,12 @@ usage() {
   DEPLOYED_BY          写进状态文件的发布者，CI 里传 github-actions
   CD_ALLOW_INFRA_CHANGE=1
       允许把 docker-compose.yml / dind-daemon.json 的改动自动应用。默认拒绝。
-  CD_SOAK_SECONDS      换版后的观察窗长度，默认 0（阶段 4 打开）
+  CD_SOAK_SECONDS      换版后的观察窗长度，**默认 300**（5 分钟）。0 = 关闭。
+  CD_SHADOW_TIMEOUT    影子容器等 /health 的上限，默认 180
+  CD_SHADOW_LLM=0      跳过影子启动里的真实 LLM 调用（默认 1，会真打一次 LLM API）
+
+通知由末尾的 EXIT trap 统一发出（deploy/cd/notify.sh），通道配置在
+/etc/erp-agent/notify.env。**通知失败不影响退出码** —— 发布结果不由它决定。
 EOF
 }
 
@@ -47,15 +52,13 @@ cd_backup() {
     return 0
 }
 
-cd_shadow() {
-    # 阶段 4 会在这里用新镜像起一次性容器做旁观者验证，失败 exit 4。
-    warn "影子启动尚未实现（阶段 4）：新镜像**没有**在换版前单独验过。"
-    return 0
-}
+# cd_shadow() 在 lib.sh 里 —— 它要起容器、要接网络，和 cd_wait_healthy / cd_smoke
+# 是同一类东西，放一起。失败返回 1，由调用方 exit 4。
 
 cd_soak() {
-    local seconds="${CD_SOAK_SECONDS:-0}"
-    [ "$seconds" -gt 0 ] || { info "观察窗关闭（CD_SOAK_SECONDS=0，阶段 4 打开）"; return 0; }
+    # 默认 5 分钟（方案 5.7）。要跳过就显式 CD_SOAK_SECONDS=0。
+    local seconds="${CD_SOAK_SECONDS:-300}"
+    [ "$seconds" -gt 0 ] || { info "观察窗关闭（CD_SOAK_SECONDS=0）"; return 0; }
     log "观察窗 ${seconds}s：每 15s 探一次 /health，并扫日志里的错误"
     local end=$((SECONDS + seconds)) code
     while [ "$SECONDS" -lt "$end" ]; do
@@ -118,11 +121,35 @@ cd_apply_and_verify() {
     return 0
 }
 
+# ---------------------------------------------------------------- 通知
+# 一个 EXIT trap 收口所有退出路径 —— 逐个 exit 点手动发通知一定会漏掉新增的那条。
+# 退出码语义因此在通知里也有了统一解释（见 lib.sh 的 CD_EXIT_*）。
+cd_deploy_exit_trap() {
+    local rc=$?
+    [ "${CD_TRAP_DONE:-0}" = "1" ] && return 0
+    CD_TRAP_DONE=1
+    CD_DEPLOY_SECONDS=$(( SECONDS - ${CD_START_SECONDS:-0} ))
+    CD_NOTIFY_EXIT="$rc"
+    case "$rc" in
+        "$CD_EXIT_OK")                cd_notify deploy_succeeded ;;
+        "$CD_EXIT_ROLLED_BACK")       cd_notify rollback_succeeded --text "换版后验证未通过，已自动回滚（回滚成功码是 5，不是 0）" ;;
+        "$CD_EXIT_SOAK_ROLLED_BACK")  cd_notify rollback_succeeded --text "观察窗未通过，已自动回滚" ;;
+        "$CD_EXIT_ROLLBACK_FAILED")   cd_notify rollback_failed --text "服务可能是坏的，**需要人立刻介入**" ;;
+        "$CD_EXIT_SHADOW")            cd_notify shadow_failed --text "新镜像没通过影子启动，**生产一秒都没停**" ;;
+        "$CD_EXIT_BACKUP")            cd_notify backup_failed ;;
+        *)                            cd_notify deploy_failed ;;
+    esac
+    return 0
+}
+
 # ---------------------------------------------------------------- deploy
 cd_action_deploy() {
     [ -n "${TAG:-}" ] || die "deploy 需要 <tag>（形如 sha-79c3c3a1b2c3，或 local）" "$CD_EXIT_PRECHECK"
     [ -n "${SHA:-}" ] || die "deploy 需要完整的 <sha>（40 位）。只有 tag 不够：还要同步那一版的源码树。" "$CD_EXIT_PRECHECK"
     CD_RUN_TAG="$TAG"
+    CD_NOTIFY_SHA="$SHA"
+    CD_START_SECONDS=$SECONDS
+    trap 'cd_deploy_exit_trap' EXIT
 
     cd_preflight
     cd_lock
@@ -133,6 +160,19 @@ cd_action_deploy() {
     cd_assert_repo_has "$SHA" || cd_fetch_repo || true
     cd_assert_repo_has "$SHA" \
         || die "裸仓库 $CD_IMAGE_REPO 里没有 $SHA，fetch 也没拿到。" "$CD_EXIT_PRECHECK"
+
+    # 语义化版本是 **commit 的属性**，不是调用方传进来的参数：release-please 打的
+    # vX.Y.Z tag 就挂在被构建的那个 commit 上，所以 `describe --exact-match` 拿到的
+    # 才是真值。取不到（手工发布、tag=local）就退回镜像 tag —— 别伪造一个版本号。
+    # --match 把候选限死在版本 tag 上，是防御性的：当前远程没有书签 tag，但开发机
+    # 上有几个（memory-*-20260917）。它们一旦被推上来又正好指向同一个 commit，
+    # describe 挑中哪个是不确定的 —— 状态文件里就会记下一个不是版本号的"版本号"。
+    # 这个字段是人打开 state 文件时唯一能读的东西，值得钉死。
+    CD_NOTIFY_VERSION="$(git -C "$CD_IMAGE_REPO" describe --tags --exact-match --match 'v[0-9]*' "$SHA" 2>/dev/null || true)"
+    [ -n "$CD_NOTIFY_VERSION" ] || CD_NOTIFY_VERSION="$TAG"
+    info "版本 $CD_NOTIFY_VERSION（镜像 tag=$TAG）"
+
+    cd_notify deploy_started
 
     local old_sha old_nginx old_version
     old_sha="$(cd_state_get "$CD_STATE_FILE" GIT_SHA || true)"
@@ -170,9 +210,13 @@ cd_action_deploy() {
 
     # pending 写在正式状态之前：中途被打断时它会留在磁盘上，巡检会告警 ——
     # 这是「发布卡在半途」唯一可靠的信号。
-    cd_write_state "$CD_PENDING_FILE" "$TAG" "$SHA" "${DEPLOYED_BY:-$(whoami)@$(hostname)}"
+    cd_write_state "$CD_PENDING_FILE" "$CD_NOTIFY_VERSION" "$SHA" "${DEPLOYED_BY:-$(whoami)@$(hostname)}"
 
-    cd_shadow || exit "$CD_EXIT_SHADOW"
+    # 影子启动：失败即止，**生产一秒都没停**（这是它存在的全部理由，见 lib.sh）。
+    if ! cd_shadow; then
+        warn "影子启动未通过 —— 中止发布，生产未受任何影响"
+        exit "$CD_EXIT_SHADOW"
+    fi
 
     cd_write_override
 
@@ -187,7 +231,7 @@ cd_action_deploy() {
         fi
         mv "$CD_PENDING_FILE" "$CD_STATE_FILE"
         cd_record_history
-        log "发布成功：$TAG（$SHA）"
+        log "发布成功：$CD_NOTIFY_VERSION（tag=$TAG sha=$SHA）"
         cd_report_state
         exit "$CD_EXIT_OK"
     fi
@@ -278,9 +322,17 @@ cd_action_rollback() {
 
     if [ "$check_only" = "1" ]; then
         # 只校验不执行：0 = 回滚能力具备，1 = 不具备。巡检 cron 用它提前发现
-        # 「回滚能力已经没了」，而不是等真出事时才发现。
+        # 「回滚能力已经没了」，而不是等真出事时才发现。**装通知 trap 之前 return**：
+        # 巡检每 10 分钟跑一次 --check，给它发通知是刷屏。
         if cd_rollback_check; then exit "$CD_EXIT_OK"; else exit "$CD_EXIT_PRECHECK"; fi
     fi
+
+    # 手工回滚：通知里报的是"退回到哪一版"，不是当前那版。
+    CD_NOTIFY_VERSION="$(cd_state_get "$CD_PREV_FILE" VERSION || true)"
+    CD_NOTIFY_SHA="$(cd_state_get "$CD_PREV_FILE" GIT_SHA || true)"
+    CD_START_SECONDS=$SECONDS
+    trap 'cd_deploy_exit_trap' EXIT
+    cd_notify rollback_started
 
     # cd_do_rollback 自己会再校验一次（自动回滚也走那里），这里不重复。
     cd_do_rollback "$CD_EXIT_ROLLED_BACK"
