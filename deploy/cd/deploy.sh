@@ -44,11 +44,54 @@ usage() {
 EOF
 }
 
-# ---------------------------------------------------------------- 阶段 5 占位
+# ---------------------------------------------------------------- 备份（阶段 5）
+# 实现在 deploy/dr/backup.sh。这里只做三件事：把这一版的坐标传下去、把结论读
+# 回来、写进状态文件的 DB_DUMP / DB_DUMP_SHA256。判定逻辑（枚举了哪几个库、
+# 自检过没过）全在那边 —— 不在这里重新解释一遍，否则两处会漂。
+#
+# 失败即 exit 2，此时**生产一个字节都没动过**（备份在同步源码树之前）。
+#
+# 备份在 cd_check_infra_change 之后、prev 快照之前：这个位置让「迁移/换版把
+# 数据搞坏」这件事有东西可回退，而不是只有一份「发布前应该还在」的口头记忆。
 cd_backup() {
-    # 阶段 5 会在这里做 mongodump + restore 自检，失败 exit 2。
-    warn "备份尚未实现（阶段 5）：本次发布**没有**数据库备份。"
-    warn "  Mongo 数据如果被这次改动搞坏，只能靠人工。"
+    local dr="$CD_REPO_ROOT/deploy/dr/backup.sh"
+    if [ ! -f "$dr" ]; then
+        warn "找不到 $dr —— 这一版源码树里没有备份脚本，本次发布**没有**数据库备份。"
+        warn "  这不该发生（deploy/dr/ 不在 package.filter 的排除项里）。"
+        return 1
+    fi
+
+    # 子进程读不到我们这边的变量，坐标必须显式 export。
+    CD_BACKUP_VERSION="${CD_NOTIFY_VERSION:-unknown}"
+    CD_BACKUP_GIT_SHA="${SHA:-}"
+    export CD_BACKUP_VERSION CD_BACKUP_GIT_SHA
+
+    # 结论走文件不走 stdout：备份脚本大量输出进度，从 stdout 里挑一行是不可靠的
+    # （多一个 echo 就会解析错），而这里的解析结果要进状态文件。
+    local result rc=0
+    result="$(mktemp)"
+    export BACKUP_RESULT_FILE="$result"
+
+    log "数据库备份（含 restore 自检）"
+    bash "$dr" || rc=$?
+
+    if [ "$rc" -ne 0 ]; then
+        warn "备份失败（deploy/dr/backup.sh 退出码 $rc）—— 本次发布中止，生产未受影响"
+        rm -f "$result"
+        return 1
+    fi
+
+    CD_DB_DUMP="$(cd_state_get "$result" DB_DUMP || true)"
+    CD_DB_DUMP_SHA256="$(cd_state_get "$result" DB_DUMP_SHA256 || true)"
+    rm -f "$result"
+
+    # 脚本报成功但没给坐标 = 状态文件里会记下 DB_DUMP= 空，也就是「这次发布
+    # 没有备份」—— 正是这个阶段要消灭的那个状态。宁可在这里失败。
+    if [ -z "$CD_DB_DUMP" ] || [ -z "$CD_DB_DUMP_SHA256" ]; then
+        warn "备份脚本报了成功，但没有回传 DB_DUMP/DB_DUMP_SHA256"
+        return 1
+    fi
+    info "备份：$CD_DB_DUMP"
     return 0
 }
 

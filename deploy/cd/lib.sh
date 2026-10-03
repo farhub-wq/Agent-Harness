@@ -23,6 +23,19 @@ CD_LOCK_FILE="${CD_LOCK_FILE:-/var/lock/erp-agent-deploy.lock}"
 # `git archive <sha> | rsync`，不依赖 GitHub 可达，也不依赖工作区是否干净。
 CD_IMAGE_REPO="${CD_IMAGE_REPO:-/srv/erp-agent.git}"
 
+# ---- 备份（阶段 5，实现在 deploy/dr/）----
+# 备份目录**刻意不在**生产树里：生产树每次发布都会被 rsync --delete 刷一遍，
+# 放在里面等于每次发布删一次备份。也刻意不在 /var/lib/docker 所在的子目录 ——
+# 它要能被单独统计空间（见 status.sh 与 patrol.sh）。
+CD_BACKUP_DIR="${CD_BACKUP_DIR:-/var/backups/erp-agent}"
+CD_BACKUP_KEEP="${CD_BACKUP_KEEP:-7}"
+# mongo 的 **服务名**（不是容器名）：备份与自检都通过 compose 找到它，
+# 这样 CI 与生产走的是同一条代码路径。
+CD_MONGO_SERVICE="${CD_MONGO_SERVICE:-mongo}"
+# 自检用的一次性容器要跑的镜像。默认按 compose 里声明的来 —— 恢复必须用
+# **不高于** dump 来源的 server 版本，写死一个版本号迟早会和 compose 漂移。
+CD_MONGO_IMAGE="${CD_MONGO_IMAGE:-mongo:6.0}"
+
 # deploy.sh 的退出码语义。CI 靠它区分处置方式：
 #   0  成功
 #   1  前置检查失败 —— 完全没动过
@@ -314,6 +327,7 @@ cd_assert_synced() {
              deploy/.env.example deploy/nginx.env.example deploy/nginx/nginx.conf \
              deploy/nginx/templates/internal_token.conf.template \
              deploy/cd/lib.sh deploy/cd/deploy.sh deploy/cd/package.filter \
+             deploy/dr/backup.sh \
              src/agent/main_agent.py; do
         [ -e "$CD_REPO_ROOT/$f" ] || missing="$missing $f"
     done
