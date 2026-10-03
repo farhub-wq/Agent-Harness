@@ -55,12 +55,20 @@ else
     # 只有 daocloud 镜像站可达，而 buildkitd 不读宿主 daemon 的 registry-mirrors。
     # 漏了它构建会卡在拉基础镜像上（见 buildkitd.toml）。**改这个配置要
     # `docker buildx rm <builder>` 后重建**：--config 只在 create 时读一次。
+    # buildkitd.toml 在仓库树 deploy/runner/ 里，但仓库树在 /root/erp-agent/，
+    # /root 是 0700，ghrunner 没有 traverse 权限。把配置拷到 ghrunner 能读
+    # 的位置再传给 buildx。这个文件内容很小（~900 字节），拷一次即可。
+    buildkit_cfg="/home/$RUNNER_USER/.docker/buildkitd.toml"
+    install -o "$RUNNER_USER" -g "$RUNNER_USER" -m 0644 \
+        "$SRC_DIR/buildkitd.toml" "$buildkit_cfg"
+    info "buildkitd.toml → $buildkit_cfg"
+
     as_runner docker buildx create \
         --name "$BUILDER" \
         --driver docker-container \
         --driver-opt "memory=$BUILDER_MEMORY" \
         --driver-opt "cpu-quota=$BUILDER_CPU_QUOTA" \
-        --config "$SRC_DIR/buildkitd.toml" \
+        --config "$buildkit_cfg" \
         --use
 fi
 

@@ -15,7 +15,15 @@
 #   RUNNER_NAME      默认 erp-agent-prod
 #   RUNNER_LABELS    默认 erp-agent-prod
 #   RUNNER_SHA256    可选：tarball 的 sha256。不传则首次安装记录、后续比对（TOFU）
+#   RUNNER_TARBALL   本地 tarball 路径，给了就跳过下载
 #   INSTALL_GH=1     顺带装 gh（默认 0：工作流不用它，生产机上少一个二进制）
+#
+# RUNNER_TARBALL 为什么存在（2026-10-03 真机实测）：这台机器**拉不动
+#   github.com/actions/runner/releases/download/***（000 / 15s 超时），而
+#   api.github.com 是 200 / 0.3s、codeload.github.com 是 200 / 1.0s。所以
+#   「run 得起来」和「runner 装得上」依赖的是不同的主机：工作流的 checkout 与
+#   action 下载走 api/codeload（通），只有 runner 自己的发布产物那条路被挡。
+#   处置：在能上网的机器上 curl 下来，scp 上去，用这个变量指过来。
 #
 # 安全的全部前提只有一条：**这个 runner 永远不执行不可信来源的代码**。
 # 它由 deploy/ci/lint-workflows.sh 强制，不是由本脚本强制。
@@ -119,8 +127,16 @@ if [ -x "$RUNNER_DIR/config.sh" ] && [ -f "$RUNNER_DIR/.runner" ]; then
 else
     TMP="$(mktemp -d)"
     trap 'rm -rf "$TMP"' EXIT
-    info "下载 $URL"
-    curl -fsSL --proto '=https' --tlsv1.2 -o "$TMP/$TARBALL" "$URL"
+    if [ -n "${RUNNER_TARBALL:-}" ]; then
+        # 见脚本头部：这台机器拉不到 releases/download/*，tarball 由人工 scp 上来。
+        # 这里只校验它不是个空文件 —— 内容的可信度由下面的 sha256 那一关负责。
+        [ -s "$RUNNER_TARBALL" ] || die "RUNNER_TARBALL=$RUNNER_TARBALL 不存在或为空"
+        info "用本地 tarball $RUNNER_TARBALL（跳过下载）"
+        cp -- "$RUNNER_TARBALL" "$TMP/$TARBALL"
+    else
+        info "下载 $URL"
+        curl -fsSL --proto '=https' --tlsv1.2 -o "$TMP/$TARBALL" "$URL"
+    fi
 
     GOT_SHA="$(sha256sum "$TMP/$TARBALL" | cut -d' ' -f1)"
     if [ -n "${RUNNER_SHA256:-}" ]; then
