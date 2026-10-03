@@ -25,18 +25,18 @@
 
 本次补上「发布与回滚」，并修掉一个会挡住前端镜像构建的错误。
 
-- **发布 / 回滚工具**：新增 [deploy/cd/](deploy/cd/)（`deploy.sh` / `status.sh` / `lib.sh` / `package.filter`）。同步源码树走 `git archive <sha>` + `rsync --delete --filter`，取源是一个**裸镜像仓库**，所以既不依赖 GitHub 可达、也不依赖工作区干净——物理上只可能同步已提交的内容。回滚**同时还原镜像和源码树**（宿主源码树是部署产物的一部分，见下条），`state/production.env` 是「这台机器现在跑的是哪一版」的唯一真值源，记的是 **digest 而不是 tag**（tag 可以被重新指向，digest 不能）。
+- **发布 / 回滚工具**：新增 [deploy/cd/](deploy/cd/)（`deploy.sh` / `build.sh` / `status.sh` / `lib.sh` / `notify.sh` / `shadow_probe.py` / `package.filter`）。同步源码树走 `git archive <sha>` + `rsync --delete --filter`，取源是一个**裸镜像仓库**，所以既不依赖 GitHub 可达、也不依赖工作区干净——物理上只可能同步已提交的内容。回滚**同时还原镜像和源码树**（宿主源码树是部署产物的一部分，见下条），`state/production.env` 是「这台机器现在跑的是哪一版」的唯一真值源，记的是 **digest 而不是 tag**（tag 可以被重新指向，digest 不能）。
 - **为什么回滚必须连源码树一起回**：四个 bind mount 把宿主文件直接喂进容器——`src/skills` → backend、`deploy/nginx/**` → nginx、`deploy/dind-daemon.json` → dind。只回滚镜像会让线上变成「镜像旧、配置新」。推论：`docker compose up -d` **不会**因为 bind 文件的内容变了而重建容器，改了 `deploy/nginx/**` 就必须显式 `--force-recreate nginx`（脚本用哈希比对自动做这件事）。
 - **退出码语义**（CI 靠它区分处置方式）：`0` 成功 / `1` 前置失败 / `2` 备份失败 / `3` 同步失败 / `4` 影子启动失败 —— 前四种生产**完全没动过**；`5` 换版失败已回滚 / `6` 观察窗失败已回滚 / `7` **回滚也失败，需要人工介入**。注意**回滚成功是 5 不是 0**：回滚不算发布成功。
 - **真机实测的停机窗口**：正常换版 **44s**、坏版本自动回滚 **134s**（其中约 100s 是 compose 自己探测 `depends_on` 健康条件失败）、镜像没换时的同版本重发布只要 **4s**。`backend` 必须单副本（沙箱注册表与会话是进程内状态），所以每次换版必然停机，SSE 实断约 20s。
 - **两条不能碰的死线**（写在 `lib.sh` 的 `cd_compose()` 里，是代码而不是注释）：`docker compose down` 会重建网络，破坏 `mcp-sandbox` 静态 IP 与沙箱内 `/etc/hosts` 的一致性，沙箱内所有 MCP 工具挂掉；`docker compose prune` / `rm` 会删掉未被运行容器引用的镜像，也就是**全部历史版本**，回滚能力瞬间归零且不可逆。同理，**永远不要在部署机上跑 `docker system prune -a`**。
 - **修复前端镜像的构建阻塞**：`frontend/Dockerfile` 的 `COPY --from=build /app/public ./public` 在源路径不存在时会**直接让构建失败**（不是跳过、不是警告）。上一条 `Delete frontend/public directory` 把 `create-next-app` 的 5 个占位 svg 删掉、整个目录随之消失后，前端镜像就再也构建不出来。加一个 `RUN mkdir -p public` 兜住，仓库里有没有 `public/` 都能构建。
 
-> 尚未实现，脚本里是**明确的占位**（跑起来会告警，不会假装做过了）：发布前的数据库备份（阶段 5）、换版前的影子启动与观察窗（阶段 4），以及部署机上的 self-hosted runner 与配套的发布流水线。**PR 门禁（GitHub Actions）已经落地**，见下。
+> 尚未实现，脚本里是**明确的占位**（跑起来会告警，不会假装做过了）：**发布前的数据库备份（阶段 5）**、以及可观测（阶段 6）。换版前的影子启动与观察窗、部署机上的 self-hosted runner 与配套的发布流水线已落地，见下面两节。
 
 ### CI 门禁：7 个 job，PR 上必过
 
-`.github/workflows/ci.yml` 调 `_gates.yml`（可复用工作流——将来的发布流水线会调**同一份**，保证「PR 上验过的」和「发布时验的」是同一套判据）。**只监听 `pull_request`**：光推分支不触发任何检查，必须开 PR。
+`.github/workflows/ci.yml` 调 `_gates.yml`（可复用工作流——发布流水线调的是**同一份**，保证「PR 上验过的」和「发布时验的」是同一套判据）。**只监听 `pull_request`**：光推分支不触发任何检查，必须开 PR。
 
 | job | 管什么 |
 |------|--------|
@@ -53,6 +53,25 @@
 两条容易误判的：在上面那个坏版本下 `/healthz` 与 `/health` **仍然返回 200**（它们各自有自己的 `set`）——**探活全绿不足以说明代理链路是好的**；完整拓扑那个 job 也只探不经 `/api/` 的 `/healthz`，**它的绿同样不代表代理没事**。
 
 断言全部写在 [deploy/ci/](deploy/ci/) 的脚本里而不是 YAML 的 `run:` 块里，所以每一步都能在本地命令行重跑（这也是能快速定位问题的原因——详见 [deploy/ci/README.md](deploy/ci/README.md)）。
+
+### 发布流水线：版本 → 构建 → 审批 → 影子 → 换版 → 观察窗
+
+四个 workflow，**按触发点分工**而不是按功能分工，因为触发点就是安全边界：
+
+| workflow | 触发点 | 干什么 |
+|---|---|---|
+| `release-please.yml` | `push: main` | conventional commits → 开一个 `chore(main): release X.Y.Z` 的 PR；合并后打 `vX.Y.Z` tag |
+| `build.yml` | `v*` tag / 手工 | 先过 `_gates.yml`（同一份门禁），在**目标机本地**构建三个镜像，打 `sha-<12>` 与 `vX.Y.Z` 两个 tag |
+| `deploy.yml` | **只有手工** | 经 `production` 环境**人工审批**后，调提权闸门换版：影子启动 → 换版 → 观察窗 → 通知 |
+| `ci.yml` | `pull_request` | 上面那套门禁 |
+
+三件必须说清楚的事：
+
+- **没有镜像仓库。** 构建机就是运行机，镜像不推任何 registry，也就没有"推上去再拉下来"这条链路上的一切失败模式。代价是构建只能在这台机器上做（2 核），所以 `build.sh` 会按改动路径跳过没必要重建的镜像。
+- **自托管 runner 只跑 push/tag 触发的 workflow。** 它装在生产机上、在 docker 组里（= 事实上的 root）。仓库是 public，fork PR 能改 workflow 文件的内容，所以「PR 门禁一律跑 GitHub 托管 runner」不是优化建议，它就是安全模型本身——由 `deploy/ci/lint-workflows.sh` 强制（沿 `uses:` 查传递闭包），由 PR 门禁自己运行。
+- **换版前的影子启动是"生产一秒都不停"的那一层。** 用新镜像起一个一次性容器（同网络同环境变量），验 `/health`、MCP 可达、`/api` 带令牌 200 而**去掉令牌 401**、以及一次真实 LLM 调用。它刻意不接 sandbox 网络、不挂 docker socket——否则它启动时的 `prune_orphans()` 会清空生产的沙箱预热池，自己把自己变成一次故障。
+
+失败处置由退出码决定（`0` 成功 / `1`–`4` **生产完全没动过** / `5`、`6` 已自动回滚 / `7` 回滚也失败需要人上机），`deploy.yml` 会把每个码翻译成一句处置建议。装 runner、提权设计、回滚能力巡检见 [deploy/runner/README.md](deploy/runner/README.md)。
 
 ## 2026-09-26 更新
 

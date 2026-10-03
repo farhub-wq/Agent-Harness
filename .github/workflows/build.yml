@@ -1,0 +1,105 @@
+# 在目标机上构建版本化镜像。
+#
+# 触发点只有两个：release-please 打出 vX.Y.Z tag，或人工 dispatch 重建。
+# **没有 pull_request** —— 这个文件跑在自托管 runner 上（就是生产机本身），
+# fork PR 能改这个文件的内容，让它在生产机上执行任意代码。所以它只能由
+# 已合并到 main 之后的 tag 触发。
+# deploy/ci/lint-workflows.sh 会强制这一点（沿 uses: 传递检查）。
+name: build
+
+on:
+  push:
+    tags:
+      # 只认 release-please 打的语义化版本 tag。
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '要重建的 tag（例：v1.0.0）。留空则用最新的版本 tag。'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  # 与 ci.yml 一致：_gates.yml 里的 gitleaks 需要它才能留评论。tag 推送时没有
+  # PR 可评论，但调用方的权限是被调 workflow 的上限 —— 少给会在 _gates.yml 内部
+  # 变成一类只在 tag 上出现、PR 上永远复现不了的失败。
+  pull-requests: write
+
+# 串行，且**不**取消进行中的构建。
+# 两个理由：这台机器只有 2 核，两次构建并行会让每次构建的 CPU 配额互相挤，
+# 总时长更长；更糟的是「取消」= 在一次 --load 中途打断，可能留下半截镜像，
+# 而下次构建打的是同一个 sha-* tag。宁可排队。
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+
+  # tag 先过一遍与 PR 完全相同的门禁集。
+  # 这不是保险起见的重复劳动：tag 是指向 main 上某个 commit 的，而那个 commit
+  # 在 PR 上验过 —— 但验过之后可能又有人往同一分支追加过 commit。发布前的这
+  # 一遍是**对将要构建的那棵树本身**的验证，不是对"它当初的 PR"的验证。
+  # 用的是同一个 _gates.yml，所以判据不会和 PR 上漂移。
+  gates:
+    uses: ./.github/workflows/_gates.yml
+
+  build:
+    name: 构建镜像
+    needs: gates
+    runs-on: [self-hosted, erp-agent-prod]
+    # 前端 npm install + build 在 2 核上不便宜，首次冷缓存可能十几分钟。
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # build.sh 要按 tag 取源码、按上一个 tag 算变更集 —— 浅克隆在这两处
+          # 都会得到"找不到对象"或"算成全量"。这是这个文件里最容易被改坏的一行。
+          fetch-depth: 0
+
+      - name: 解析版本
+        id: ver
+        # 输入通过 env 传，不用 ${{ }} 直接插进 run: —— 那是在 shell 里拼接
+        # 用户可控字符串，是一个能直接打到生产机的注入点。
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            v="$INPUT_VERSION"
+            if [ -z "$v" ]; then
+              v="$(git describe --tags --abbrev=0 --match 'v[0-9]*')"
+              echo "未指定 version，用最新的版本 tag：$v"
+            fi
+          else
+            v="$REF_NAME"
+          fi
+          case "$v" in
+            v[0-9]*.[0-9]*.[0-9]*) : ;;
+            *) echo "::error::version '$v' 不是 vX.Y.Z 形式"; exit 1 ;;
+          esac
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: 构建
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: bash deploy/cd/build.sh "$VERSION"
+
+      - name: 摘要
+        if: always()
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          {
+            echo "### 构建 $VERSION"
+            if [ -n "${VERSION:-}" ]; then
+              echo
+              echo '```'
+              docker image ls --format '{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}' \
+                | grep -E '^(erp-agent-app|erp-agent-frontend|erp-mock):' || true
+              echo '```'
+              echo "下一步：dispatch \`deploy.yml\`，version=$VERSION（需要 production 环境审批）。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

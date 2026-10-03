@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "simple",
+  "include-v-in-tag": true,
+  "packages": {
+    ".": {
+      "package-name": "erp-agent",
+      "initial-version": "1.0.0"
+    }
+  },
+  "changelog-sections": [
+    { "type": "feat",     "section": "新功能" },
+    { "type": "fix",      "section": "修复" },
+    { "type": "perf",     "section": "性能" },
+    { "type": "refactor", "section": "重构" },
+    { "type": "revert",   "section": "回退" },
+    { "type": "docs",     "section": "文档" },
+    { "type": "ci",       "section": "CI" },
+    { "type": "build",    "section": "构建" },
+    { "type": "chore",    "section": "杂项", "hidden": true },
+    { "type": "test",     "section": "测试", "hidden": true }
+  ]
+}

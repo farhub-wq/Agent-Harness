@@ -1,12 +1,16 @@
 # deploy/cd —— 发布与回滚
 
-生产栈的发布/回滚由这里的三个脚本负责，**只在部署机上跑**。
+生产栈的发布/回滚由这里的脚本负责，**只在部署机上跑**（唯一的例外是 `build.sh`，
+它跑在 CI 的 checkout 里）。
 
 | 文件 | 作用 |
 |---|---|
-| `lib.sh` | 共享库：环境常量、compose 包装、锁、状态文件、健康与冒烟。被下面两个 source |
+| `lib.sh` | 共享库：环境常量、compose 包装、锁、状态文件、健康与冒烟、影子启动、通知 |
 | `deploy.sh` | `deploy` / `init` / `rollback`（含 `--check`） |
 | `status.sh` | 只读巡检，给 systemd timer 和运维人用 |
+| `build.sh` | 在目标机本地构建三个镜像并打 `sha-<12>` / `vX.Y.Z` 两个 tag。**跑在 CI，不跑在生产树** |
+| `shadow_probe.py` | 影子容器内跑的断言集，被 `lib.sh` 的 `cd_shadow()` 拷进去执行 |
+| `notify.sh` | 发布通知（飞书/webhook）。**发送失败不影响发布结果** |
 | `package.filter` | rsync 同步源码树时的排除/保护清单 |
 
 ## 用法
@@ -143,14 +147,23 @@ backend / frontend 的 `image`。mongo / dind / nginx / sandbox-image-loader 不
 `state/production.pending.env` 存在 = **有一次发布卡在半途**。这是「发布没走完」
 唯一可靠的信号，`status.sh` 会为它告警。
 
-## 尚未实现（按方案的阶段推进）
+## 发布链路的其余环节
 
-这套脚本目前覆盖**阶段 2（同步与回滚）**。以下两处是刻意的占位，**跑起来会明确
-告警**，不会假装做过了：
+阶段 4 已落地，这里只列**入口**，细节在各自的文件里：
 
-- **备份（阶段 5）**：还没有 `mongodump` + restore 自检。发布前不会备份数据库。
-- **影子启动（阶段 4）**：新镜像没有在换版前单独起一次性容器验过。
-- **观察窗（阶段 4）**：`CD_SOAK_SECONDS` 默认 0（关闭）。
+| 环节 | 位置 | 说明 |
+|---|---|---|
+| 影子启动 | `lib.sh` 的 `cd_shadow()` + `shadow_probe.py` | 换版前用新镜像起一次性容器，验 `/health`、MCP 可达、`/api` 带令牌 200 / 不带 401、LLM 可达。**生产未被触碰** |
+| 观察窗 | `deploy.sh` 的 `cd_soak()` | 默认 300s（`CD_SOAK_SECONDS`），期间健康转差即自动回滚（退出码 6） |
+| 通知 | `notify.sh` | 飞书/webhook，部署开始/成功/失败/回滚各自一条。**发送失败不影响发布结果** |
+| 提权入口 | `deploy/runner/erp-agent-deploy` | runner 唯一的提权点，参数白名单 + 生产密钥由 root 读 |
+| 构建 | `build.sh` | 机器本地构建三个镜像，打 `sha-<12>` 与 `vX.Y.Z` 两个 tag |
 
-配套的 GitHub Actions 工作流、self-hosted runner、systemd 资源护栏、通知、
-可观测同样还没做。
+## 尚未实现
+
+- **数据库备份（阶段 5）**：还没有 `mongodump` + restore 自检。发布前**不会**备份
+  数据库；`cd_backup()` 目前是空实现并在 `state` 里留空 `DB_DUMP` 字段。
+- **可观测（阶段 6）**：没有指标/日志聚合，观察窗只看容器健康与日志尾部。
+- **构建失败的通知**：`build.sh` 以 `ghrunner` 身份跑，读不到 root 600 的
+  `/etc/erp-agent/notify.env`，所以构建失败**不发飞书**，只在 Actions 页面与
+  GitHub 通知邮件里可见。要让构建也发通知，得再开一个提权面，暂时不值得。

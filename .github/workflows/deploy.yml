@@ -1,0 +1,198 @@
+# 发布 / 回滚。**只能手工 dispatch**，且必须通过 production 环境的审批。
+#
+# 为什么没有别的触发点：
+#   - 没有 push：发布是人的决定，不是 tag 的副作用。build.yml 建好镜像就停住，
+#     换不换生产由人点。
+#   - 没有 pull_request：这个文件跑在自托管 runner 上（生产机本身）。
+# deploy/ci/lint-workflows.sh 沿 uses: 检查传递闭包，会拦住任何往这条路上接
+# PR 触发的改法。
+#
+# 三处提权设计（细节见 deploy/runner/erp-agent-deploy 的注释）：
+#   1. 工作流自身**不**碰生产树，只调一个 root 所有、0755 的包装脚本；
+#   2. sudoers 里只有一行 NOPASSWD，目标写死成那个路径；
+#   3. 生产密钥（冒烟口令、通知 webhook）在 /etc/erp-agent/*.env（root 600），
+#      由包装脚本以 root 读，runner 的进程环境里从头到尾没有它们。
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: '动作'
+        required: true
+        default: deploy
+        type: choice
+        options:
+          - deploy
+          - rollback
+      version:
+        description: '要发布的版本 tag（例：v1.0.0）。rollback 不需要。'
+        required: false
+        type: string
+      soak_seconds:
+        description: '换版后的观察窗秒数（0 = 跳过）。默认 300。'
+        required: false
+        default: '300'
+        type: string
+      allow_infra_change:
+        description: '允许应用拓扑变更（docker-compose.yml / dind 配置）。默认不允许。'
+        required: false
+        default: false
+        type: boolean
+      shadow_llm:
+        description: '影子里做一次真实 LLM 调用（花几分钱，但能验出上游不可达）。'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+# 生产只有一套栈，两次发布并发改同一棵树 = 状态文件与镜像 tag 互相覆盖。
+# deploy.sh 里还有一道 flock，但让第二个 job 在 runner 上排队比让它冲进去撞锁好。
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: ${{ inputs.action }} production
+    runs-on: [self-hosted, erp-agent-prod]
+    # 换版 + 回滚各约 40s，观察窗默认 300s。45 分钟是防止卡死时的兜底 ——
+    # 注意这个超时会**杀掉** deploy.sh 进程，所以不能设得太紧。
+    timeout-minutes: 45
+    # 这一行就是「人工审批」。没有它，dispatch 立刻开跑；有了它，job 卡在
+    # waiting 状态直到 farhub-wq 在 Actions 页面上点 Approve。
+    # 不写 url：仓库是 public，把生产地址写进来等于公布它。
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 要把 v1.0.0 解析成完整 40 位 sha（deploy.sh 按 sha 从裸仓库取源码树）。
+          # 浅克隆拿不到 tag 对象。
+          fetch-depth: 0
+
+      - name: 确认可以提权
+        # 单独一步、放在最前面：如果 sudoers 没装好，这一步失败的信息是
+        # "sudo 被拒绝"，而不是在一次发布跑到一半时出现，让人分不清
+        # 是发布脚本坏了还是权限没配。exit code 1 的归属也靠这一步消歧。
+        run: |
+          set -euo pipefail
+          out="$(sudo -n /usr/local/sbin/erp-agent-deploy help)" || {
+            echo "::error::sudo -n /usr/local/sbin/erp-agent-deploy 失败。检查 /etc/sudoers.d/ghrunner 与包装脚本权限（跑 deploy/runner/install-runner.sh 的最后一步断言）。"
+            exit 1
+          }
+          # 不打 `| head -5`：输出小的时候 head 提前退出会让 printf 吃到 SIGPIPE，
+          # 而 pipefail 把 141 当失败 —— 一个"为了少打几行日志"引入的偶发红。
+          printf '%s\n' "$out"
+
+      - name: 解析参数
+        id: args
+        env:
+          ACTION: ${{ inputs.action }}
+          VERSION: ${{ inputs.version }}
+          SOAK: ${{ inputs.soak_seconds }}
+          ALLOW_INFRA: ${{ inputs.allow_infra_change }}
+          SHADOW_LLM: ${{ inputs.shadow_llm }}
+        # 所有输入走 env，不用 ${{ }} 拼进 run:。version 是自由文本，
+        # 直接拼接就是往生产机上打命令注入。
+        run: |
+          set -euo pipefail
+
+          case "$SOAK" in
+            ''|*[!0-9]*) echo "::error::soak_seconds 必须是非负整数（收到 '$SOAK'）"; exit 1 ;;
+          esac
+          if [ "${#SOAK}" -gt 4 ]; then
+            echo "::error::soak_seconds 上限 9999（收到 '$SOAK'）"; exit 1
+          fi
+
+          {
+            echo "soak=$SOAK"
+            echo "shadow_llm=$([ "$SHADOW_LLM" = "true" ] && echo 1 || echo 0)"
+            echo "allow_infra=$([ "$ALLOW_INFRA" = "true" ] && echo 1 || echo 0)"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$ACTION" = "rollback" ]; then
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          case "$VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) : ;;
+            *) echo "::error::version '$VERSION' 不是 vX.Y.Z 形式"; exit 1 ;;
+          esac
+
+          # 包脚本只收 sha-<12位hex> + 40 位 hex，这里就把它们算出来 ——
+          # 让形状不对的输入在包装脚本之前就被拦掉，报错信息更贴近原因。
+          sha="$(git rev-parse --verify --quiet "${VERSION}^{commit}")" \
+            || { echo "::error::本地没有 tag $VERSION"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${sha:0:12}" >> "$GITHUB_OUTPUT"
+          echo "将发布 $VERSION → 镜像 tag sha-${sha:0:12}（commit $sha）"
+
+      - name: 执行
+        id: exec
+        env:
+          ACTION: ${{ inputs.action }}
+          TAG: ${{ steps.args.outputs.tag }}
+          SHA: ${{ steps.args.outputs.sha }}
+          SOAK: ${{ steps.args.outputs.soak }}
+          SHADOW_LLM: ${{ steps.args.outputs.shadow_llm }}
+          ALLOW_INFRA: ${{ steps.args.outputs.allow_infra }}
+        run: |
+          set -uo pipefail
+
+          args=()
+          if [ "$ACTION" = "rollback" ]; then
+            args=(rollback production)
+          else
+            args=(deploy production "$TAG" "$SHA" --soak "$SOAK" --shadow-llm "$SHADOW_LLM")
+            # 拓扑变更的开关**只在显式勾选时**出现：deploy.sh 见到这个变量为 1
+            # 才会跳过 cd_check_infra_change。少传比多传安全。
+            [ "$ALLOW_INFRA" = "1" ] && args+=(--allow-infra-change)
+          fi
+
+          echo "执行：sudo -n /usr/local/sbin/erp-agent-deploy ${args[*]}"
+          set +e
+          sudo -n /usr/local/sbin/erp-agent-deploy "${args[@]}"
+          rc=$?
+          set -e
+
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: 退出码含义
+        if: always()
+        env:
+          ACTION: ${{ inputs.action }}
+          VERSION: ${{ inputs.version }}
+          RC: ${{ steps.exec.outputs.rc }}
+        run: |
+          set -uo pipefail
+          # deploy.sh 的退出码是发布链路的**接口**，每一种都要有明确的处置动作。
+          # 这张表同时是给"将来写自动处置"的人看的：5 和 6 已经自动回滚过了，
+          # 不需要人再点 rollback；7 需要人立刻上机。
+          case "${RC:-unknown}" in
+            0)  msg="成功：换版 + 观察窗都通过，生产在跑 $VERSION" ;;
+            1)  msg="失败：前置检查没过 —— **生产完全没被碰过**。看日志里第一条 !! 开头的信息。（也可能是 sudo 本身失败，但上一步「确认可以提权」已排除）" ;;
+            2)  msg="失败：备份失败 —— **生产完全没被碰过**。多半是磁盘空间。" ;;
+            3)  msg="失败：源码树同步失败 —— 已还原源码树，业务未受影响。看 rsync 的错误。" ;;
+            4)  msg="失败：影子启动没通过 —— **生产完全没被碰过**。新镜像本身有问题，看影子容器日志。" ;;
+            5)  msg="换版后验证失败，**已自动回滚到上一版**。生产现在是旧的、可用的。需要修的是新版本。" ;;
+            6)  msg="观察窗内健康转差，**已自动回滚到上一版**。生产现在是旧的、可用的。看日志里的 health_degraded 详情。" ;;
+            7)  msg="_回滚也失败了。生产**可能是坏的**，需要立刻上机。_" ;;
+            *)  msg="没拿到退出码（job 被取消或超时？）。上机跑 \`erp-agent-deploy status production\` 看现在到底在跑什么。" ;;
+          esac
+          {
+            echo "## $ACTION $VERSION"
+            echo
+            echo "$msg"
+            echo
+            echo "退出码：\`${RC:-未知}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$msg"
+          if [ "${RC:-0}" != "0" ]; then
+            echo "::error::$msg"
+          fi
