@@ -48,7 +48,8 @@ source <(sed -e '/^# .*入口/,$d' -e '/^DR_DIR=/d' "$DR")
 set +e +o pipefail
 
 __section "被测函数都在（装配方式变了的话这里先红）"
-for fn in dr_compare dr_prune dr_merge_counts dr_valid_name dr_write_manifest; do
+for fn in dr_compare dr_prune dr_merge_counts dr_valid_name dr_write_manifest \
+          dr_wrap_js dr_mongo_eval_checked; do
     if [ "$(type -t "$fn")" = "function" ]; then ok "$fn"; else bad "$fn 没被 source 进来"; fi
 done
 [ "$FAIL" -eq 0 ] || { printf '\n装配失败，后面的用例没有意义\n' >&2; exit 1; }
@@ -103,6 +104,49 @@ for u in 'mongodb://h:27017/db?x=1' 'mongodb://h:27017' 'mongodb://h:27017/' \
         *)   bad "形状：$u → $got（查询串前面没有 '/'）" ;;
     esac
 done
+
+# ---------------------------------------------------------------- 哨兵
+__section "dr_mongo_eval_checked：包装（哨兵）由函数自己加，调用方只给裸正文"
+# 这里断言的不是「谁调用了谁」，是那个契约本身。2026-10-03 的 bug 正是契约没被
+# 强制：dr_record 自己拼了 JS 直接调 dr_mongo_eval_checked，没走 dr_wrap_js ——
+# 哨兵没打，「记账成功」于是**永远**被判成失败，而账本其实已经写进去了（症状
+# 因此同时长得像两种毛病：账本里多了一行 + 记账写不进去）。
+#
+# 修法是把包装挪进被调函数，所以能被桩测锁住的正是这一条：给一段**裸正文**，
+# 函数必须自己把哨兵加上。桩掉容器那一层就够了，不需要 mongo、也不需要 node。
+# 桩要经**文件**回传收到的 JS：dr_mongo_eval_checked 里是 `out="$(dr_mongo_eval …)"`，
+# 那是子 shell，函数里给变量赋值出不来。这个坑本身也值一条注释 —— 我第一次写这
+# 一节就是被它骗的：断言全红，而代码是对的。
+SEEN="$(__mk)/seen.js"
+dr_mongo_eval() { printf '%s' "$1" > "$SEEN"; printf '%s\n' "$1"; }
+
+out="$(dr_mongo_eval_checked 'print("BODY");')"; rc=$?
+check "$rc" "0" "裸正文跑通 → 通过"
+got="$(cat "$SEEN")"
+case "$got" in
+    *"print(\"$DR_MONGO_SENTINEL\")"*) ok "哨兵是函数自己打上的（调用方不需要知道它存在）" ;;
+    *) bad "生成的 JS 里没有哨兵，记账那条路径会再次永远判失败：$got" ;;
+esac
+case "$got" in
+    *BODY*) ok "正文原样带进去了" ;;
+    *)      bad "正文没进生成的 JS：$got" ;;
+esac
+case "$got" in
+    *"try {"*) ok "正文被包进 try（异常时才能打印原因再 quit 1）" ;;
+    *)         bad "没有 try 包裹：$got" ;;
+esac
+
+# 判据是哨兵，不是退出码 —— mongosh 存在「打印了错误、然后 0 退出」的情形，而
+# 把没跑成的迁移记成「已应用」是最坏的一种：数据库没改，账本说改过了。
+dr_mongo_eval() { printf '一段输出，但没有哨兵\n'; }   # 退出码 0
+out="$(dr_mongo_eval_checked 'print("X");' 2>&1)"; rc=$?
+check "$rc" "1" "退出码 0 但输出里没哨兵 → 判失败"
+# 报错本身要说得清是「哨兵没出现」，否则半夜看到的只是一句没头没尾的失败。
+case "$out" in
+    *"$DR_MONGO_SENTINEL"*) ok "报错点名了缺的是哪个哨兵" ;;
+    *) bad "报错没说清缺哨兵：$out" ;;
+esac
+# 桩留在这个 shell 里不再还原：这个文件后面没有别的地方调 dr_mongo_eval。
 
 # ---------------------------------------------------------------- 区间合成
 __section "dr_merge_counts：dump 前后两次读数 → 期望区间"

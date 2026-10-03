@@ -148,25 +148,11 @@ dr_applied() {
     ' | tr -d '\r' | grep -v '^[[:space:]]*$' || true
 }
 
-# 把一段迁移 JS 包起来。两件事：
-#   1. 成功了打哨兵 —— dr_mongo_eval_checked 靠它判断，而不是靠 mongosh 的退出码
-#      （见 lib-dr.sh 里那段解释）；
-#   2. 异常时先打出来再 quit(1)。不包的话 mongosh 只回一个非零码，我们就只剩
-#      "失败了"这一条信息，而失败原因恰恰是唯一有价值的部分。
-dr_wrap_js() {
-    cat <<EOF
-try {
-$1
-print("$DR_MONGO_SENTINEL");
-} catch (e) {
-print("__DR_ERR__ " + (e && e.message ? e.message : String(e)));
-quit(1);
-}
-EOF
-}
-
 # 记账。**与迁移脚本分两次执行**：迁移成功的证据是它自己跑完，记账成功的证据是
 # 这次往返跑通了。合成一次的话，"跑了一半断掉"会被记成"成功"。
+#
+# 参数是裸的 JS 正文 —— 哨兵由 dr_mongo_eval_checked 统一加（dr_wrap_js 在
+# lib-dr.sh）。这里原先自己拼 JS 却没走那层包装，于是它**永远**被判成失败。
 dr_record() {
     local id="$1" sha="$2" host
     host="$(hostname 2>/dev/null | tr -cd 'A-Za-z0-9.-' || echo unknown)"
@@ -183,7 +169,7 @@ dr_record() {
 
 dr_apply_one() {
     local id="$1" sha="$2" path="$3"
-    dr_mongo_eval_checked "$(dr_wrap_js "$(cat "$path")")" || {
+    dr_mongo_eval_checked "$(cat "$path")" || {
         warn "迁移 $id 执行失败（$path）"
         return 1
     }
