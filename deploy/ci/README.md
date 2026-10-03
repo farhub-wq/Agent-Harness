@@ -10,6 +10,11 @@
 | `prepare-stack.sh` | 生成 `deploy/.env`、`deploy/nginx.env`、`deploy/nginx/htpasswd` 与一次性口令 |
 | `smoke-edge.sh` | `auth-path` job 的断言：认证与代理链路（HTTP 层） |
 | `stack-smoke.sh` | `stack-smoke` job 的断言：完整拓扑，含真 dind 与沙箱预热池 |
+| `backup-dr.sh` | `backup-dr` job 的断言：起一个 mongo、跑真备份、跑恢复自检、**负向用例**、保留策略 |
+| `migrate-e2e.sh` | `backup-dr` job 的断言：跑真迁移、验幂等、验内容被改 / 编号撞车会停住 |
+| `dr-logic-test.sh` | 备份链路的**纯逻辑**桩测（不需要 Docker）：清单解析、区间边界、剪枝的保护集 |
+| `migrate-logic-test.sh` | 迁移器的纯逻辑桩测：编号排序、账本比对、孤儿检测 |
+| `patrol-logic-test.sh` | 巡检的纯逻辑桩测：指纹、差异摘要、「发布在跑吗」的年龄判据 |
 
 ## 为什么断言是脚本，不是 workflow 里的 `run:`
 
@@ -34,6 +39,25 @@
 `frontend` / `build-verify` job 共用 scope 会让两个 job 同时导出同一个 cache key），
 再让 compose 用本地镜像起栈；`stack-smoke` 刻意让 compose 自己 build，因为它要
 验证的就是 compose 的 build 配置本身。
+
+## `backup-dr`：为什么备份链路也在 PR 门禁里
+
+它不构建任何镜像（只起 mongo），是这批 job 里最便宜的一个，但护住的是最贵的东西。
+理由是**备份链路失效的形态全是「看起来正常」**：
+
+- 少备份了一个库 —— `checkpointing_db` 不在任何配置里（见
+  [deploy/dr/README.md](../dr/README.md)），漏了它备份文件依然是好的、自检也是过的；
+- 自检其实什么都没比 —— 比如 `counts.tsv` 丢了导致逐集合比对那个循环一条都不跑；
+- 剪枝把要用的那份删了 —— 而它是回滚的真值源。
+
+这三件事都不会报错，只会在真需要它的那一天暴露，而那天没有第二次机会。所以负向
+用例比正向用例更重要：**一个只会说「通过」的 fail-closed 自检就是安慰剂**。
+
+三个 `*-logic-test.sh` 跑在最前面（几秒钟出结果，且不需要 Docker）。它们覆盖的是
+端到端用例碰不到的解析/比较路径 —— 而且巡检那条**只有在 CI 里能被自动验证**：它的
+失效方式是「几天后悄悄不再告警」和「每次发布都发一条假告警」，两者在真机上都要等好
+几天才看得出来，而后者会让人把整套通知静音掉。它们抓到过真问题（见
+`deploy/ci/patrol-logic-test.sh` 与 `dr-logic-test.sh` 的文件头）。
 
 ## 本机怎么重跑
 

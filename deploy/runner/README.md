@@ -126,24 +126,20 @@ sudo /usr/local/sbin/erp-agent-deploy rollback production --check
 **回滚能力巡检**值得挂个 timer。丢回滚能力的典型路径是构建保留策略或人工
 `docker image prune` 把上一版的镜像删了 —— 而这件事只在你想回滚的那一刻才暴露。
 `rollback --check` 就是为此存在的：它验 prev 快照完整、prev 的镜像还在且 digest
-没变、prev 的 commit 还能从裸仓库取到，**不修改任何东西**。
+没变、prev 的 commit 还能从裸仓库取到，**不修改任何东西**（它刻意不取发布锁，
+理由见 [deploy/cd/README.md](../cd/README.md)）。
 
-一个 10 分钟的 timer 示例（`--check` 路径刻意装在通知 trap 之前，所以不会刷屏）：
+**这个 timer 已经有人装了，不要再手写一份。** 阶段 5 起由
+[deploy/monitor/](../monitor/) 的巡检统一负责，`rollback --check` 是它每 10 分钟
+跑的其中一项（而且是**只在状态变迁时**才通知 —— 手写的那份每 10 分钟跑一次、
+每次都发，刷屏几天之后就会被静音掉）：
 
-```ini
-# /etc/systemd/system/erp-agent-rbcheck.service
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/erp-agent-deploy rollback production --check
+```bash
+sudo bash deploy/monitor/install-monitor.sh
 ```
-```ini
-# /etc/systemd/system/erp-agent-rbcheck.timer
-[Timer]
-OnBootSec=5min
-OnUnitActiveSec=10min
-[Install]
-WantedBy=timers.target
-```
+
+它会装巡检、每日心跳、每日备份三个 timer，并顺带提示你去停掉早期手工建的
+`erp-agent-rbcheck.timer`（如果存在）。细节见 [deploy/dr/README.md](../dr/README.md)。
 
 ## 排错
 
