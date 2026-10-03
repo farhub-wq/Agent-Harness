@@ -7,7 +7,12 @@
 #
 # 事件：deploy_started / deploy_succeeded / deploy_failed / shadow_failed /
 #       rollback_started / rollback_succeeded / rollback_failed /
-#       backup_failed / migrate_failed / health_degraded / drill_report
+#       backup_failed / migrate_failed / health_degraded / drill_report /
+#       patrol_alert / patrol_ok / heartbeat
+#
+# heartbeat 与 patrol_* 由 deploy/monitor/patrol.sh 发（timer 驱动）。它们共用
+# 这一份通道配置，是为了让「机器还活着吗」和「发布成功了吗」走同一条路 ——
+# 如果巡检自己另有一套通道，那套通道没人会去验证它通不通。
 #
 # 通道由 ALERT_KIND + ALERT_WEBHOOK 选。两者都没配时**只告警不报错** ——
 # 「没配通知」不应该让一次发布失败。
@@ -61,10 +66,11 @@ done
 
 # 事件 -> 好不好消息。跨脚本复用同一份语义，别让每个调用点自己判断怎么措辞。
 case "$EVENT" in
-    deploy_succeeded|rollback_succeeded|drill_report) ICON="✅" ;;
+    deploy_succeeded|rollback_succeeded|drill_report|patrol_ok)        ICON="✅" ;;
     deploy_started|rollback_started)                  ICON="🚀" ;;
     deploy_failed|rollback_failed|backup_failed|shadow_failed|migrate_failed) ICON="❌" ;;
-    health_degraded)                                  ICON="⚠️" ;;
+    patrol_alert|health_degraded)                     ICON="⚠️" ;;
+    heartbeat)                                        ICON="💚" ;;
     *)                                                ICON="ℹ️" ;;
 esac
 

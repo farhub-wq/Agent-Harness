@@ -1,0 +1,30 @@
+[Unit]
+Description=erp-agent 机内巡检（状态变迁才告警）
+# 巡检要读 compose 状态、running 容器的 digest、/etc/erp-agent/*.env，这些都要
+# docker 先起来。Wants 而不是 Requires：docker 没起来的时候巡检**恰恰最该跑**
+# （它会报出「七个服务一个都不在」），Requires 会让它在那种时候根本不执行。
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+# 巡检全程只读生产状态（status.sh 一个字节都不写），但要读 /etc/erp-agent/*.env
+# 和跑 docker，所以是 root。不用 ghrunner：那条路是为了让 CI 能提权，而巡检是
+# 本机的 timer，绕一圈只会多一个失效点。
+User=root
+# 路径写死成 /root/erp-agent，与 deploy/runner/erp-agent-deploy 的 PROD_ROOT 同一个
+# 约定。install-monitor.sh 会断言两处一致并拒绝安装（见那里）—— 一个指错路径的
+# timer 的表现是「装了，但再也没有任何告警」，而那看起来和「一切正常」一样。
+ExecStart=/bin/bash /root/erp-agent/deploy/monitor/patrol.sh
+
+# 一轮不能拖过下一轮。120s 是一轮实测耗时（秒级）的几十倍，只用来兜住 docker
+# daemon 卡死那种情况 —— 卡住的巡检比没跑更糟，它会一直占着锁让后面每一轮都跳过。
+TimeoutStartSec=120
+# 巡检不该和业务抢 CPU：它每 10 分钟醒一次，晚几秒没有任何影响。
+Nice=10
+IOSchedulingClass=idle
+
+# 刻意**不设** OnFailure=：告警出口在 patrol.sh 里（状态变迁 + 每日心跳）。
+# systemd 这一层的失败只是给上机的人看的第二信号（systemctl --failed），
+# 再接一个 OnFailure 到通知脚本会让「一轮失败」和「巡检状态变坏」发两条内容
+# 相似的消息，而重复的消息会训练人忽略它。

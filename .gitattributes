@@ -25,6 +25,11 @@ deploy/runner/erp-agent-deploy  text eol=lf
 # （CRLF 无害），纳入进来只会产生一次无意义的整文件 diff。
 *.conf                     text eol=lf
 *.template                 text eol=lf
+# systemd 单元。CRLF 会让 systemd 把 `After=docker.service\r` 解析成另一个单元名，
+# 而报错只说「依赖的单元不存在」—— 排查方向离换行符很远。同一个理由已经在
+# *.conf（nginx）与 *.sudoers 上写过一遍了。
+*.service                  text eol=lf
+*.timer                    text eol=lf
 Dockerfile                 text eol=lf
 deploy/.env.example        text eol=lf
 deploy/nginx.env.example   text eol=lf

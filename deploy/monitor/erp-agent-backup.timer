@@ -1,0 +1,15 @@
+[Unit]
+Description=erp-agent 每日数据库备份
+
+[Timer]
+# 03:17（非整点，理由同 heartbeat.timer）。刻意早于 05:07 的心跳：心跳里报的
+# 备份新鲜度因此是在当天备份已经做完之后读的。
+OnCalendar=*-*-* 03:17:00
+# 机器在 03:17 关着时开机后补做一次。备份与心跳不同：心跳漏一天只是少一条
+# 消息，备份漏一天是真的少一份可恢复的数据，而这台机器的数据只有这一处第二份。
+Persistent=true
+AccuracySec=1min
+Unit=erp-agent-backup.service
+
+[Install]
+WantedBy=timers.target

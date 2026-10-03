@@ -395,14 +395,23 @@ cd_action_rollback() {
     if [ "${CHECK_ONLY:-0}" = "1" ]; then check_only=1; fi
 
     cd_preflight
-    cd_lock
 
     if [ "$check_only" = "1" ]; then
-        # 只校验不执行：0 = 回滚能力具备，1 = 不具备。巡检 cron 用它提前发现
-        # 「回滚能力已经没了」，而不是等真出事时才发现。**装通知 trap 之前 return**：
+        # 只校验不执行：0 = 回滚能力具备，1 = 不具备。巡检用它提前发现「回滚能力
+        # 已经没了」，而不是等真出事时才发现。**装通知 trap 之前 return**：
         # 巡检每 10 分钟跑一次 --check，给它发通知是刷屏。
+        #
+        # **刻意不取发布锁**（--check 这一支在 cd_lock 之前就 return 了）。这条
+        # 分支不写任何生产状态，而它的调用方是一个无人值守、每 10 分钟响一次的
+        # timer —— 让它持锁就等于让它有机会把一次刚巧撞上的真实发布打成
+        # exit 1「另一处发布/巡检正在跑」。**一个会弄挂发布的巡检比没有巡检更糟**，
+        # 因为它的故障方式恰好是「发布挂了，而原因指向监控」。
+        # 代价是它可能读到一次写到一半的状态文件（cd_write_state 是先截断再写），
+        # 那会产出一条下一轮就自愈的假告警 —— 比弄挂发布便宜得多。
         if cd_rollback_check; then exit "$CD_EXIT_OK"; else exit "$CD_EXIT_PRECHECK"; fi
     fi
+
+    cd_lock
 
     # 手工回滚：通知里报的是"退回到哪一版"，不是当前那版。
     CD_NOTIFY_VERSION="$(cd_state_get "$CD_PREV_FILE" VERSION || true)"

@@ -1,0 +1,16 @@
+[Unit]
+Description=erp-agent 机内巡检（每 10 分钟）
+
+[Timer]
+# OnBootSec + OnUnitActiveSec 而不是 OnCalendar：这里要的是「稳定的间隔」，不是
+# 「整点对齐」。OnUnitActiveSec 是相对于**上一次启动**算的，所以它是固定节奏而
+# 不是「上一轮跑完之后再等 10 分钟」—— 后者会让告警的时间点随着每轮耗时漂移。
+OnBootSec=5min
+OnUnitActiveSec=10min
+# 抖一下没关系，但别抖太多：AccuracySec 的默认值就是 1 分钟，写出来是因为
+# 这个值决定了两轮之间最坏能差多久。
+AccuracySec=30s
+Unit=erp-agent-patrol.service
+
+[Install]
+WantedBy=timers.target

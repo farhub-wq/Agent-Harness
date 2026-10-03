@@ -36,6 +36,36 @@ CD_MONGO_SERVICE="${CD_MONGO_SERVICE:-mongo}"
 # **不高于** dump 来源的 server 版本，写死一个版本号迟早会和 compose 漂移。
 CD_MONGO_IMAGE="${CD_MONGO_IMAGE:-mongo:6.0}"
 
+# 磁盘门槛。**一处定义**：deploy.sh 的前置检查、status.sh 的巡检、patrol.sh 的
+# 告警都读它。原先这个 8 同时写在 cd_assert_disk 的默认参数和 status.sh 的字面量
+# 里 —— 两个地方各改一次的话，会出现「前置检查说不够、巡检说够」这种互相打脸的
+# 输出，而那种输出会让人开始不信这两条检查。
+CD_DISK_MIN_GB="${CD_DISK_MIN_GB:-8}"
+
+# 备份新鲜度门槛（天）。备份在发布时做、外加每天的 erp-agent-backup.timer，
+# 所以超过这个天数说明两条路都断了 —— 那是个真问题，不是噪音。
+CD_BACKUP_MAX_AGE_DAYS="${CD_BACKUP_MAX_AGE_DAYS:-3}"
+
+# ---- 巡检（阶段 5，实现在 deploy/monitor/）----
+# 巡检状态目录。**刻意不在仓库树里**：patrol 每 10 分钟写一次，放进仓库等于每 10
+# 分钟弄脏一次工作区；而且 tree 是 rsync --delete 刷出来的，状态会跟着没。
+CD_PATROL_STATE_DIR="${CD_PATROL_STATE_DIR:-/var/lib/erp-agent}"
+# 上一次的判定结果（一组 id|OK/FAIL）。不是机密，root 0644 即可。
+CD_PATROL_LAST="${CD_PATROL_LAST:-$CD_PATROL_STATE_DIR/patrol.last}"
+# 巡检自己的锁：防手动重跑与 timer 撞车导致重复告警。**与发布锁是两把**——
+# 巡检去抢发布锁会拦住正在进行的发布，那是比漏报更糟的事。
+CD_PATROL_LOCK="${CD_PATROL_LOCK:-$CD_PATROL_STATE_DIR/patrol.lock}"
+
+# 「一次发布正在进行中」的判据阈值（秒）：pending 文件比它年轻就算发布在跑。
+# 由 cd_deploy_in_flight 用，两个调用方：巡检验它决定整轮跳过，定时备份验它决定
+# 跳过本轮（2 核 3.6G 上两个 mongodump + 两个 512m 恢复容器能把生产挤到 OOM）。
+#
+# 1200s 是实测发布耗时的十倍以上（换版 44s、回退 39s），刻意留得宽：这里宁可
+# 少报也不要误报，因为误报的表现是「发布时必来一条告警 + 一条恢复」。
+# 另一侧的边界同样重要 —— 卡住不动的 pending 超过这个岁数就不再被当成「在跑」，
+# 于是它会被巡检当成故障报出来，而那正是不该漏的那一种。
+CD_DEPLOY_INFLIGHT_GRACE="${CD_DEPLOY_INFLIGHT_GRACE:-1200}"
+
 # deploy.sh 的退出码语义。CI 靠它区分处置方式：
 #   0  成功
 #   1  前置检查失败 —— 完全没动过
@@ -165,7 +195,7 @@ cd_assert_token_consistency() {
 }
 
 cd_assert_disk() {
-    local need_gb="${1:-8}" avail_gb
+    local need_gb="${1:-$CD_DISK_MIN_GB}" avail_gb
     avail_gb="$(df -BG --output=avail /var/lib/docker 2>/dev/null | tail -1 | tr -dc '0-9')"
     [ -n "$avail_gb" ] || { warn "读不出 /var/lib/docker 可用空间，跳过磁盘门槛"; return 0; }
     if [ "$avail_gb" -lt "$need_gb" ]; then
@@ -186,7 +216,7 @@ cd_preflight() {
     [ -f "$CD_REPO_ROOT/deploy/nginx/htpasswd" ] \
         || die "缺 deploy/nginx/htpasswd：nginx 起不来。见 deploy/README.md「创建登录账号」" "$CD_EXIT_PRECHECK"
     cd_assert_token_consistency
-    cd_assert_disk 8
+    cd_assert_disk "$CD_DISK_MIN_GB"
 }
 
 # ---------------------------------------------------------------- 发布锁
@@ -335,6 +365,7 @@ cd_assert_synced() {
              deploy/cd/lib.sh deploy/cd/deploy.sh deploy/cd/package.filter \
              deploy/dr/backup.sh deploy/dr/lib-dr.sh \
              deploy/dr/offsite.sh deploy/dr/ossutil-install.sh deploy/dr/migrate.sh \
+             deploy/monitor/patrol.sh \
              src/agent/main_agent.py; do
         [ -e "$CD_REPO_ROOT/$f" ] || missing="$missing $f"
     done
@@ -398,6 +429,22 @@ cd_state_get() {
     local file="$1" key="$2"
     [ -f "$file" ] || return 1
     sed -n "s/^$key=//p" "$file" | head -1
+}
+
+# 一次发布是否**正在跑**（而不是「历史上有过一次没走完的」）。判据是 pending 文件
+# 还年轻 —— 卡住的 pending 是另一回事：那个要**报出来**，不是要躲开它。
+#
+# 两个调用方，理由不同但都需要它：
+#   patrol.sh  发布期间服务在重建、digest 天然对不上，照常判定会让每次发布都产生
+#              一条告警加一条恢复，而发布本身已经有自己的四条通知了；
+#   backup.sh  定时备份不该和一次发布抢 mongodump。
+cd_deploy_in_flight() {
+    [ -f "$CD_PENDING_FILE" ] || return 1
+    local now mtime
+    now="$(date +%s)"
+    mtime="$(stat -c '%Y' "$CD_PENDING_FILE" 2>/dev/null || echo 0)"
+    [ "$mtime" -gt 0 ] || return 1
+    [ "$(( now - mtime ))" -lt "$CD_DEPLOY_INFLIGHT_GRACE" ]
 }
 
 cd_load_state() {

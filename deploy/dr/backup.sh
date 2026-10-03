@@ -390,18 +390,25 @@ dr_prune() {
 # ---------------------------------------------------------------- 外推
 # 实现在 commit 2（OSS）。这里刻意做成一个**显式的告警**而不是静默成功 ——
 # 「同盘不是备份」这条如果被代码悄悄跳过，等于没有。
+#
+# 外推的**结果**由 offsite.sh 自己写进备份目录的 offsite.status（它才是唯一知道
+# 事情办成了没有的一方，见那里的 dr_offsite_mark）。这里只管三件它管不到的事。
 dr_offsite() {
-    local script="$DR_DIR/offsite.sh"
+    local dir="$1" script="$DR_DIR/offsite.sh"
+
     if [ "${CD_BACKUP_NO_OFFSITE:-0}" = "1" ]; then
         info "跳过外推（CD_BACKUP_NO_OFFSITE=1）"
+        dr_offsite_mark "$dir" skipped "CD_BACKUP_NO_OFFSITE=1（CI 或演练）"
         return 0
     fi
     if [ ! -f "$script" ]; then
         warn "外推尚未实现：这份备份与生产在**同一块磁盘**上。"
         warn "  磁盘坏掉或实例被释放时它一起消失。见 deploy/dr/README.md。"
+        dr_offsite_mark "$dir" skipped "没有 $script"
         return 0
     fi
-    bash "$script" "$1"
+
+    bash "$script" "$dir"
 }
 
 # ---------------------------------------------------------------- 主体
@@ -409,6 +416,17 @@ dr_run_backup() {
     local version="${CD_BACKUP_VERSION:-unknown}"
     local sha="${CD_BACKUP_GIT_SHA:-}"
     local stamp dir dbs db img mhash total
+
+    # 定时备份（erp-agent-backup.timer）设这个环境变量：**一次发布正在进行时跳过
+    # 本轮**。理由是这台机器只有 2 核 3.6G，而备份要起一个 512m 的一次性 mongo 做
+    # 恢复自检 —— 和一次发布撞上的后果是把生产挤到 OOM，而发布那条路上的备份本来
+    # 就是发布的一部分，不能因为「有 pending」就跳过它自己，所以这个守卫必须是
+    # 有条件开启的。跳过不是失败：24 小时后还有一轮，而那一轮之后紧接着的心跳会
+    # 如实报出备份有多旧。
+    if [ "${CD_BACKUP_SKIP_IF_BUSY:-0}" = "1" ] && cd_deploy_in_flight; then
+        info "有一次发布正在进行 —— 定时备份本轮跳过（不与发布抢 mongodump）"
+        return 0
+    fi
 
     mkdir -p "$CD_BACKUP_DIR"
     cd_assert_disk 3

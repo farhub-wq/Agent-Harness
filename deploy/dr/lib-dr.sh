@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# deploy/dr/ 下备份与迁移共用的 mongo 直连原语。**只定义函数，source 它不产生副作用。**
+# deploy/dr/ 下共用的原语：**绝大部分**是 mongo 直连的写法，另加备份产物的记账约定
+# （dr_offsite_mark）。**只定义函数，source 它不产生副作用。**
 #
-# 为什么要单独一个文件，而不是让 migrate.sh 去 source backup.sh：这两个脚本都需要
-# 「怎么在不把口令带进宿主机 ps 的前提下跟 mongo 说话」这一件事，而它的正确写法
-# 只有一份 —— 所有操作都在**容器里**跑、口令从容器自己的环境取（$MONGODB_URI，
+# 为什么要单独一个文件，而不是让 migrate.sh 去 source backup.sh：这几个脚本都
+# 需要「怎么在不把口令带进宿主机 ps 的前提下跟 mongo 说话」这一件事，而它的正确
+# 写法只有一份 —— 所有操作都在**容器里**跑、口令从容器自己的环境取（$MONGODB_URI，
 # 来自 deploy/.env 的 env_file）。复制第二份是这类代码漂移的标准起点；反过来让
 # 迁移脚本去依赖备份脚本，则会让「为什么迁移要加载备份」变成一个每次都要重新
 # 解释一遍的问题。
 #
-# 调用方式（backup.sh / migrate.sh 的顶部）：
+# 调用方式（backup.sh / migrate.sh / offsite.sh 的顶部）：
 #   DR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   source "$DR_DIR/../cd/lib.sh"      # cd_compose / warn / CD_MONGO_SERVICE
 #   source "$DR_DIR/lib-dr.sh"
@@ -31,6 +32,28 @@ dr_valid_name() {
     case "$1" in
         ''|*[!A-Za-z0-9_.-]*) return 1 ;;
     esac
+    return 0
+}
+
+# ---------------------------------------------------------------- 备份产物记账
+# 把外推的结论写进备份目录（$dir/offsite.status，两行：结论词 + 原因）。
+#
+# 放在这个共用文件里，是因为**写它的和被读它的不是同一个进程**：backup.sh 与
+# offsite.sh 各写各的路径（前者管「跳过」的两种情形，后者管真去推的那些），
+# 而 deploy/cd/status.sh 几周之后来读。一处定义，三处认同一个格式。
+#
+# 结论词只有三个，status.sh 只认 ok：
+#   ok       推上去了（且远端列过一遍）
+#   skipped  没配凭据 / 显式跳过 —— 备份只在**同一块磁盘**上，不是成功
+#   failed   推失败了（含被 BACKUP_OFFSITE_REQUIRED=0 降级放行的那种）
+#
+# 为什么需要它：外推的结果本来只活在**本次日志**里，而日志会滚、会被翻过去。
+# 没有这个文件，status.sh 只能说「不知道」，而「不知道」在运维眼里和「没有」
+# 是一个意思 —— 那就白报了。
+dr_offsite_mark() {
+    local dir="$1" status="$2"; shift 2
+    [ -d "$dir" ] || return 0
+    { printf '%s\n' "$status"; printf '%s\n' "$*"; } > "$dir/offsite.status" 2>/dev/null || true
     return 0
 }
 

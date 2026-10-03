@@ -23,11 +23,18 @@
 #                 AK 过期、权限被改），如果只是警告，「同盘不是备份」这条就
 #                 悄悄失效了，而谁也不会去看那条警告。
 #                 BACKUP_OFFSITE_REQUIRED=0 可以显式降级为仅告警。
+#
+# ---------------------------------------------------------------- 记账
+# 三种结局都往备份目录里写 $dir/offsite.status（结论词 + 原因），因为**退出码
+# 表达不了它们**：未配置、被降级的失败、真成功，三者都是 0。而 deploy/cd/status.sh
+# 要在几周后回答「这份备份推出去了没有」，它只能读这个文件。见 dr_offsite_mark。
 set -euo pipefail
 
 DR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../cd/lib.sh
 source "$DR_DIR/../cd/lib.sh"
+# shellcheck source=lib-dr.sh
+source "$DR_DIR/lib-dr.sh"      # dr_offsite_mark
 
 OFFSITE_ENV_FILE="${OFFSITE_ENV_FILE:-/etc/erp-agent/backup.env}"
 OSSUTIL="${OSSUTIL:-/usr/local/bin/ossutil}"
@@ -50,9 +57,18 @@ dr_offsite_cleanup() {
     DR_OFFSITE_OUT=""
 }
 
-# 失败即退出的口子收在一处：required 的判定只写一遍。
+# 记账的 helper（dr_offsite_mark）在 lib-dr.sh —— backup.sh 也要用它，而它们
+# 是两个进程，不能各定义一份。
+#
+# 记账一律在**上传循环开始之后**（或根本没开始上传）写，所以 offsite.status
+# 永远不会被 glob 带进上传列表 —— 那会让「远端对象数 ≥ 本地文件数」这条校验对不上。
+#
+# 失败即退出的口子收在一处：required 的判定与记账都只写一遍。
+# **记账写在判定之前**：降级为「只告警」的那些次，推送同样没成功，而正是那些次
+# 最容易被忘掉 —— 报成 ok 会让 status.sh 说「已推送到 OSS」，那是假的。
 dr_offsite_fail() {
-    local msg="$1"
+    local dir="$1" msg="$2"
+    dr_offsite_mark "$dir" failed "$msg"
     warn "$msg"
     if [ "${BACKUP_OFFSITE_REQUIRED:-1}" = "0" ]; then
         warn "  BACKUP_OFFSITE_REQUIRED=0 —— 只告警，继续发布。"
@@ -92,6 +108,7 @@ dr_offsite_main() {
         warn "  这份备份只在本机磁盘上；这台机器被释放时它会一起消失，而它是"
         warn "  一台免费试用实例（deploy/cloud/README.md）。"
         warn "  配置步骤见 deploy/dr/README.md（需要你提供 OSS 的 AccessKey）。"
+        dr_offsite_mark "$dir" skipped "未配置 $OFFSITE_ENV_FILE（这份备份只在本机）"
         return 0
     fi
 
@@ -110,9 +127,9 @@ dr_offsite_main() {
     for v in OSS_BUCKET OSS_ENDPOINT OSS_AK OSS_SK; do
         [ -n "${!v:-}" ] || missing="$missing $v"
     done
-    [ -z "$missing" ] || dr_offsite_fail "$OFFSITE_ENV_FILE 缺:$missing" || return 1
+    [ -z "$missing" ] || dr_offsite_fail "$dir" "$OFFSITE_ENV_FILE 缺:$missing" || return 1
 
-    [ -x "$OSSUTIL" ] || dr_offsite_fail "找不到可执行的 ossutil（$OSSUTIL）。先跑 deploy/dr/ossutil-install.sh" || return 1
+    [ -x "$OSSUTIL" ] || dr_offsite_fail "$dir" "找不到可执行的 ossutil（$OSSUTIL）。先跑 deploy/dr/ossutil-install.sh" || return 1
 
     # 前缀两侧的斜杠统一去掉，避免出现 // 或丢失分隔。
     local prefix="${OSS_PREFIX:-erp-agent}"
@@ -186,8 +203,9 @@ dr_offsite_main() {
     dr_offsite_cleanup
     trap - EXIT
     if [ "$rc" -ne 0 ]; then
-        dr_offsite_fail "异地备份失败（$remote）" || return 1
+        dr_offsite_fail "$dir" "异地备份失败（$remote）" || return 1
     fi
+    dr_offsite_mark "$dir" ok "已推送到 $remote（$n 个对象）"
     return 0
 }
 

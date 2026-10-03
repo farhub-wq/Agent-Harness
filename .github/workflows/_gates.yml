@@ -216,11 +216,16 @@ jobs:
 
       # 先跑不依赖 Docker 的那一段：几秒钟出结果，且它覆盖的是端到端用例碰
       # 不到的解析/比较路径（清单字段错位、区间边界、剪枝的保护集、迁移的
-      # 排序与账本比对）。它抓到过真问题，见那两个脚本的文件头。
-      - name: DR 逻辑桩测（不需要 Docker）
+      # 排序与账本比对、巡检指纹）。它抓到过真问题，见那两个脚本的文件头。
+      #
+      # 巡检那条在这里是**唯一**能被自动验证的地方：它的失效方式是「几天后悄悄
+      # 不再告警」和「每次发布都发一条假告警」，两者在真机上都要等好几天才看得出来，
+      # 而后者会让人把整套通知静音掉。
+      - name: 纯逻辑桩测（不需要 Docker）
         run: |
           bash deploy/ci/dr-logic-test.sh
           bash deploy/ci/migrate-logic-test.sh
+          bash deploy/ci/patrol-logic-test.sh
 
       # mongo 的 env_file 指向 deploy/.env，没有它 compose 起不来（口令、
       # MONGODB_URI 都在里面）。
