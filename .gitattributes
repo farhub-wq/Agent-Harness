@@ -29,4 +29,12 @@ Dockerfile                 text eol=lf
 deploy/.env.example        text eol=lf
 deploy/nginx.env.example   text eol=lf
 deploy/cd/package.filter   text eol=lf
+# 迁移文件：它们的**字节**是被 sha256 记账的（deploy/dr/migrate.sh）。工作区里
+# 一旦是 CRLF，同一份迁移在不同机器上算出的哈希就不同 —— 症状是"已经应用过，
+# 但文件内容变了"，而那会直接阻住发布。
+#
+# 范围刻意写窄到 migrations/，不写 *.js：将来某个目录下的 .js 一旦被纳进来，
+# 就会触发一次和上面那段 frontend 说明同样的全库重规范化 —— 而收益只有迁移
+# 这一处，所以把路径写明比用通配更划算。
+migrations/*.js            text eol=lf
 .gitattributes             text eol=lf

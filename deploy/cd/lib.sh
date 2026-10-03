@@ -45,6 +45,11 @@ CD_MONGO_IMAGE="${CD_MONGO_IMAGE:-mongo:6.0}"
 #   5  换版后验证失败，已自动回滚（手工 rollback 成功同样是 5）
 #   6  观察窗失败，已自动回滚
 #   7  回滚也失败   —— 服务可能是坏的，需要人立刻介入
+#   8  迁移失败     —— 完全没动过（迁移在同步源码树之前）
+#
+# 8 是**刻意**新开的一个码，而不是并进 2。2 的含义与通知文案都是「备份失败 ——
+# 多半是磁盘空间」，把迁移失败报成这个，运维会去查磁盘，而真正的原因是迁移脚本
+# 在一个新结构上碰到了老数据。一个退出码的价值全在于它把处置方向指对。
 CD_EXIT_OK=0
 CD_EXIT_PRECHECK=1
 CD_EXIT_BACKUP=2
@@ -53,6 +58,7 @@ CD_EXIT_SHADOW=4
 CD_EXIT_ROLLED_BACK=5
 CD_EXIT_SOAK_ROLLED_BACK=6
 CD_EXIT_ROLLBACK_FAILED=7
+CD_EXIT_MIGRATE=8
 
 # ---------------------------------------------------------------- 输出
 log()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -327,7 +333,8 @@ cd_assert_synced() {
              deploy/.env.example deploy/nginx.env.example deploy/nginx/nginx.conf \
              deploy/nginx/templates/internal_token.conf.template \
              deploy/cd/lib.sh deploy/cd/deploy.sh deploy/cd/package.filter \
-             deploy/dr/backup.sh deploy/dr/offsite.sh deploy/dr/ossutil-install.sh \
+             deploy/dr/backup.sh deploy/dr/lib-dr.sh \
+             deploy/dr/offsite.sh deploy/dr/ossutil-install.sh deploy/dr/migrate.sh \
              src/agent/main_agent.py; do
         [ -e "$CD_REPO_ROOT/$f" ] || missing="$missing $f"
     done

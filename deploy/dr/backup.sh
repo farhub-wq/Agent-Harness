@@ -42,6 +42,8 @@ set -euo pipefail
 DR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../cd/lib.sh
 source "$DR_DIR/../cd/lib.sh"
+# shellcheck source=lib-dr.sh
+source "$DR_DIR/lib-dr.sh"
 
 CD_BACKUP_DIR="${CD_BACKUP_DIR:-/var/backups/erp-agent}"
 CD_BACKUP_KEEP="${CD_BACKUP_KEEP:-7}"
@@ -52,48 +54,8 @@ CD_RESTORE_TIMEOUT="${CD_RESTORE_TIMEOUT:-90}"
 usage() { sed -n '2,18p' "$0" >&2; }
 
 # ---------------------------------------------------------------- 基础
-# 集合名/库名会进 mongosh 的 JS 正文与命令行。它们是应用自己建的，但「上游可信」
-# 不是一个可以依赖的性质 —— 白名单校验比事后解释一次诡异报错便宜得多。
-dr_valid_name() {
-    case "$1" in
-        ''|*[!A-Za-z0-9_.-]*) return 1 ;;
-    esac
-    return 0
-}
-
-dr_mongo_image() {
-    # 恢复必须用**不高于** dump 来源的 server 版本。按正在跑的那个容器取镜像，
-    # 而不是写死版本号 —— 写死迟早会和 compose 漂移。
-    local img=""
-    img="$(cd_compose ps -q "$CD_MONGO_SERVICE" 2>/dev/null | head -1 \
-        | xargs -r docker inspect -f '{{.Config.Image}}' 2>/dev/null || true)"
-    printf '%s' "${img:-$CD_MONGO_IMAGE}"
-}
-
-dr_assert_mongo_up() {
-    local cid state
-    cid="$(cd_compose ps -q "$CD_MONGO_SERVICE" 2>/dev/null | head -1 || true)"
-    if [ -z "$cid" ]; then
-        warn "compose 里没有在跑的 '$CD_MONGO_SERVICE' 服务。先确认生产栈是起来的。"
-        return 1
-    fi
-    state="$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || true)"
-    if [ "$state" != "running" ]; then
-        warn "mongo 容器状态是 '$state'，不是 running"
-        return 1
-    fi
-    return 0
-}
-
-# 所有 mongo 操作都在容器里跑，凭据从容器自己的环境里取（$MONGODB_URI，来自
-# deploy/.env 的 env_file）。也就是说**这个脚本从头到尾不接触 Mongo 口令** ——
-# 宿主机的进程列表里不会出现它，脚本的变量里也没有它。
-dr_mongo_eval() {
-    # $1 = 一段 mongosh JS。用位置参数传，不拼进 sh -c 的正文里，避免 $ 与引号
-    # 在容器 shell 里被二次解释。
-    cd_compose exec -T "$CD_MONGO_SERVICE" sh -c \
-        'mongosh "$MONGODB_URI" --quiet --eval "$1"' -- "$1"
-}
+# dr_valid_name / dr_mongo_image / dr_assert_mongo_up / dr_mongo_eval 都在
+# deploy/dr/lib-dr.sh —— 它们同时也是迁移器要用的，「怎么跟 mongo 说话」只留一份。
 
 # ---------------------------------------------------------------- 枚举
 dr_discover_dbs() {

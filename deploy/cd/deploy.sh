@@ -95,6 +95,37 @@ cd_backup() {
     return 0
 }
 
+# ---------------------------------------------------------------- 迁移（阶段 5）
+# 实现在 deploy/dr/migrate.sh。位置是刻意的：**备份之后、同步源码树之前**。
+#
+# 为什么在同步之前：迁移失败要满足「生产一个字节都没动过」这个语义（与备份失败
+# 同级），而源码树一旦被 rsync 过，树和运行中的镜像就已经不一致了 —— 那时退回
+# 去要再 rsync 一次，中间那个窗口是发布流程里最难解释的状态。
+#
+# 为什么在备份之后：迁移是这次发布里**唯一直接改数据库结构**的一步。它之前必须
+# 已经有一份验证过能恢复的备份 —— 否则「迁移把数据改坏了」就只剩口头记忆。
+#
+# 代价：本地树这时还是**旧版**，所以迁移文件必须从新 commit 里取。这一点由
+# migrate.sh 的 --sha 承担，这里只负责把 sha 传下去。
+cd_migrate() {
+    local sha="$1"
+    local mi="$CD_REPO_ROOT/deploy/dr/migrate.sh"
+    if [ ! -f "$mi" ]; then
+        warn "找不到 $mi —— 这一版源码树里没有迁移执行器。"
+        warn "  这不该发生（deploy/dr/ 不在 package.filter 的排除项里）。"
+        return 1
+    fi
+
+    log "数据库迁移（从 $sha 取 migrations/）"
+    if ! bash "$mi" --sha "$sha"; then
+        warn "迁移失败 —— 本次发布中止，生产未受影响（退出码 $CD_EXIT_MIGRATE）"
+        warn "  数据库停在**已应用的那几个迁移**上，是已知状态；源码树与镜像都没动。"
+        warn "  排查见 migrations/README.md。"
+        return 1
+    fi
+    return 0
+}
+
 # cd_shadow() 在 lib.sh 里 —— 它要起容器、要接网络，和 cd_wait_healthy / cd_smoke
 # 是同一类东西，放一起。失败返回 1，由调用方 exit 4。
 
@@ -180,6 +211,7 @@ cd_deploy_exit_trap() {
         "$CD_EXIT_ROLLBACK_FAILED")   cd_notify rollback_failed --text "服务可能是坏的，**需要人立刻介入**" ;;
         "$CD_EXIT_SHADOW")            cd_notify shadow_failed --text "新镜像没通过影子启动，**生产一秒都没停**" ;;
         "$CD_EXIT_BACKUP")            cd_notify backup_failed ;;
+        "$CD_EXIT_MIGRATE")           cd_notify migrate_failed --text "迁移在同步源码树之前失败，生产未受影响（数据库停在已应用的迁移上，是已知状态）" ;;
         *)                            cd_notify deploy_failed ;;
     esac
     return 0
@@ -232,6 +264,8 @@ cd_action_deploy() {
         cp "$CD_STATE_FILE" "$CD_PREV_FILE"
         info "上一版已记为 $old_version（$old_sha）"
     fi
+
+    cd_migrate "$SHA" || exit "$CD_EXIT_MIGRATE"
 
     log "同步源码树到 $SHA"
     if ! cd_sync_tree "$SHA"; then
@@ -405,7 +439,15 @@ cd_do_rollback() {
         cd_diagnose
         exit "$CD_EXIT_ROLLBACK_FAILED"
     fi
-    cd_assert_synced
+    # **只告警，不中止。** cd_assert_synced 判的是「同步后该有的文件都在」，它的
+    # 前提是「目标版本应该包含这些文件」—— 这条对**向前**发布成立，对回滚不成立：
+    # 这里还原的是一个**历史上真实跑过**的树，那个版本天然可能还没有后来新增的
+    # 文件（deploy/dr/ 就是阶段 5 才有的）。拿新版的清单去要求旧版，只会让一次
+    # 本来能成的回滚死在半路，而那时线上正等着它。
+    #
+    # 向前发布那条路上的同名断言保持致命：那边目标树就是本次要发的版本，缺文件
+    # 一定是 package.filter 排除多了。
+    cd_assert_synced || warn "回滚目标的树里缺上述文件 —— 那是那个版本本来就没有的（继续）"
     CD_TREE_HASH="$(cd_content_hash "$rb_sha")"
 
     local cur_nginx prev_nginx force_nginx=0

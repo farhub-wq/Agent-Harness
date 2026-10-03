@@ -7,7 +7,7 @@
 #
 # 事件：deploy_started / deploy_succeeded / deploy_failed / shadow_failed /
 #       rollback_started / rollback_succeeded / rollback_failed /
-#       backup_failed / health_degraded / drill_report
+#       backup_failed / migrate_failed / health_degraded / drill_report
 #
 # 通道由 ALERT_KIND + ALERT_WEBHOOK 选。两者都没配时**只告警不报错** ——
 # 「没配通知」不应该让一次发布失败。
@@ -63,7 +63,7 @@ done
 case "$EVENT" in
     deploy_succeeded|rollback_succeeded|drill_report) ICON="✅" ;;
     deploy_started|rollback_started)                  ICON="🚀" ;;
-    deploy_failed|rollback_failed|backup_failed|shadow_failed) ICON="❌" ;;
+    deploy_failed|rollback_failed|backup_failed|shadow_failed|migrate_failed) ICON="❌" ;;
     health_degraded)                                  ICON="⚠️" ;;
     *)                                                ICON="ℹ️" ;;
 esac
