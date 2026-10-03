@@ -66,22 +66,43 @@ __section "dr_uri_nodb：mongodump 不许 URI 与 --db 同时给库名"
 # 这里用 `sh` 起一个独立进程来喂它，而不是在宿主机 shell 里 source —— 后者测的
 # 是另一个解释器里的另一份代码。mongo:6.0 的 /bin/sh 是 dash，CI 上 sh 也是
 # dash，所以这一跑同时把「这个片段是不是真 POSIX」验掉了。
+#
+# **这一节第一版是全绿的，而线上照样炸** —— 断言里的「期望值」是我照自己的理解
+# 手写的，写错的就是它：摘掉库名之后那个 `/` 不能一起摘掉，MongoDB 的语法要求
+# 查询串前面有 `/`（`must have a / before the query ?`）。教训不是「多写用例」，
+# 而是**桩测验证不了规格本身** —— 规格只能由真解析器来判，所以最终的判据是
+# deploy/ci/backup-dr.sh 那一跑。
 uri_nodb() { MONGODB_URI="$1" sh -c "$DR_MONGO_URI_NODB_SH"'
 dr_uri_nodb'; }
 
 check "$(uri_nodb 'mongodb://root:pw@mongo:27017/erp_agent?authSource=admin')" \
-      'mongodb://root:pw@mongo:27017?authSource=admin' \
-      "带库名与查询串 → 库名摘掉、authSource 保留"
+      'mongodb://root:pw@mongo:27017/?authSource=admin' \
+      "带库名与查询串 → 库名摘掉、那个 / 留下、authSource 保留"
 check "$(uri_nodb 'mongodb://root:pw@mongo:27017/erp_agent')" \
-      'mongodb://root:pw@mongo:27017' "只有库名（拼读时最容易漏掉的一格）"
-check "$(uri_nodb 'mongodb://mongo:27017')" 'mongodb://mongo:27017' \
-      "本来没有库名 → 原样，且不能把 host 切掉"
-check "$(uri_nodb 'mongodb://mongo:27017/')" 'mongodb://mongo:27017' "尾部空库名"
+      'mongodb://root:pw@mongo:27017/' "只有库名（拼读时最容易漏掉的一格）"
+check "$(uri_nodb 'mongodb://mongo:27017')" 'mongodb://mongo:27017/' \
+      "本来没有库名 → 只补斜杠，不能把 host 切掉"
+check "$(uri_nodb 'mongodb://mongo:27017/')" 'mongodb://mongo:27017/' "尾部已经是空库名"
 check "$(uri_nodb 'mongodb+srv://u:p@c.example.net/erp_agent?retryWrites=true')" \
-      'mongodb+srv://u:p@c.example.net?retryWrites=true' "srv 形式：加号不能被协议名切分吃掉"
+      'mongodb+srv://u:p@c.example.net/?retryWrites=true' "srv 形式：加号不能被协议名切分吃掉"
 check "$(uri_nodb 'mongodb://h1:27017,h2:27017/erp_agent?replicaSet=rs0')" \
-      'mongodb://h1:27017,h2:27017?replicaSet=rs0' "多主机列表"
+      'mongodb://h1:27017,h2:27017/?replicaSet=rs0' "多主机列表"
 check "$(uri_nodb 'mongo:27017')" 'mongo:27017' "不是 URI 形状 → 原样，不猜"
+
+# 输出**永远**是 `scheme://authority/` 开头：查询串前面那个 `/` 是 MongoDB 的
+# 语法要求，不是装饰。形状断言放在这里，是为了让「哪天有人手滑把 `/` 去掉」
+# 至少能撞上一条 —— 值断言我可能又写错，形状是死的。
+for u in 'mongodb://h:27017/db?x=1' 'mongodb://h:27017' 'mongodb://h:27017/' \
+         'mongodb+srv://a:b@c/?y=2' 'mongodb://h1,h2:27017/db'; do
+    got="$(uri_nodb "$u")"
+    # 判据是「? 之前那一截以 / 结尾」，不是「结果里有 /」—— 后者在 bug 版本上
+    # 照样成立（`h:27017?x=1` 里也有 `/`，只是位置错了），等于不设防。
+    case "${got#*://}" in
+        */)  ok  "形状：$u → $got" ;;
+        */\?*) ok "形状：$u → $got" ;;
+        *)   bad "形状：$u → $got（查询串前面没有 '/'）" ;;
+    esac
+done
 
 # ---------------------------------------------------------------- 区间合成
 __section "dr_merge_counts：dump 前后两次读数 → 期望区间"

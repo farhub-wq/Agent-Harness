@@ -116,6 +116,18 @@ Docker daemon，看不见它）。摘除逻辑是 `deploy/dr/lib-dr.sh` 的 `DR_
 —— 它在**容器里**执行，因为 `$MONGODB_URI` 带口令，在宿主机上展开等于把口令写进
 `docker exec` 的 argv。恢复演练报告里的「真正恢复时怎么做」用的是同一条规则。
 
+**摘完那个 `/` 不能一起摘掉。** 修完第一处之后 CI 又红了一次，报的是：
+
+```
+error parsing uri: must have a / before the query ?
+```
+
+MongoDB 的连接串语法要求查询串前面有 `/`，所以正确的形态是
+`mongodb://host:27017/?authSource=admin`，不是 `mongodb://host:27017?authSource=admin`。
+值得记一笔的是**桩测当时是全绿的** —— 断言里那个「期望值」是照错误的理解手写的。
+桩测能验证「代码符合我以为的规格」，验证不了规格本身；所以备份链路的真判据只能是
+`deploy/ci/backup-dr.sh` 那一跑。
+
 **`COLL` 是一段区间而不是一个数。** 生产栈在备份期间仍在服务，dump 窗口里一定有人
 在写：dump 完成后再读计数可能得到 N+1 而 dump 里只有 N。等值比较会把一个完全健康的
 备份判成坏的，而这是发布路径上的硬门槛 —— 结果是每次有人正在聊天时发布都会中止。

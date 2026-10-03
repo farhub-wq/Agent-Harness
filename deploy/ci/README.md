@@ -68,7 +68,19 @@ the --db option
 `MONGODB_URI` 里带库名，备份又逐库传 `--db`，mongodump 直接拒绝。它死在**第一个
 非 URI 库**上，也就是 `checkpointing_db` —— 那条路径在真机上意味着「第一次发布
 没有备份」，而且不发布就不会暴露。修法见 `lib-dr.sh` 的 `DR_MONGO_URI_NODB_SH`
-与 `dr-logic-test.sh` 里新加的那 7 条用例。
+与 `dr-logic-test.sh` 里新增的用例。
+
+**修完又红了一轮，而且是同一处手术的第二刀：**
+
+```
+error parsing uri: must have a / before the query ?
+```
+
+摘掉库名之后那个 `/` 必须留下（`mongodb://host:27017/?authSource=admin`）。
+值得记的是**桩测在这一轮之前是全绿的** —— 断言里的期望值是我照错误的理解手写的。
+这是这个 job 最该被记住的性质：桩测验证的是「代码符合我以为的规格」，规格本身
+只能由真的 `mongodump` 来判。所以每次改动 `DR_MONGO_URI_NODB_SH`，**必须等到
+这个 job 绿了才算完**，本机绿不算。
 
 同一轮里另外两个「只能等 CI 才知道」的悬案也一起有了答案，而且都是好消息：
 `stack-smoke` 在境外 runner 上通过 daocloud 镜像站拉 `python:3.11-slim` **能用**；

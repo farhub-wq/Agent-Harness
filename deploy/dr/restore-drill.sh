@@ -131,7 +131,7 @@ drill_recovery_howto() {
 #        H="$MONGODB_URI"; Q=""
 #        case "$H" in *\?*) Q="?${H#*\?}"; H="${H%%\?*}" ;; esac
 #        R="${H#*://}"
-#        mongorestore --uri="${H%%://*}://${R%%/*}$Q" --archive --gzip --drop' < "$f"
+#        mongorestore --uri="${H%%://*}://${R%%/*}/$Q" --archive --gzip --drop' < "$f"
 #    done
 #
 #    为什么不是简单的一句 mongorestore：
@@ -140,9 +140,11 @@ drill_recovery_howto() {
 #      b) MONGODB_URI 里带着库名，mongodump/mongorestore 会把 URI 里的库当成
 #         「只处理这个库」的选择器。直接用 "$MONGODB_URI" 的话，checkpointing_db
 #         那几份要么被灌进 erp_agent，要么什么都没做 —— 而且它不会报错。
-#         上面三行赋值就是把库名摘掉、同时保住 authSource。
-#         （2026-10-03：CI 首次真跑 backup-dr 时，mongodump 正是死在这个冲突上。
-#           改一处必须改两处。）
+#         上面三行赋值就是把库名摘掉、同时保住 authSource。注意 `R%%/*` 后面
+#         **那个斜杠不能省**：MongoDB 的语法要求查询串前面有 `/`，少一个就是
+#         `error parsing uri: must have a / before the query ?`。
+#         （2026-10-03：CI 首次真跑 backup-dr 时，mongodump 正是先死在 URI 与
+#           --db 的冲突上、再死在这个斜杠上。改一处必须改两处。）
 #    规则与 deploy/dr/lib-dr.sh 的 DR_MONGO_URI_NODB_SH 相同，但**不是同一份
 #    文本** —— 那边还多一层「URI 形状不对就原样交出去」的兜底，这里为了让人看得
 #    懂省掉了。真改规则时两处都要动。
