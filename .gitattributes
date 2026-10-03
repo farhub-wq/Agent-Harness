@@ -15,6 +15,12 @@
 
 *.sh                       text eol=lf
 *.yml                      text eol=lf
+# 这两个没有 .sh 后缀，但都会被 Linux 执行/解析，属于上面说的那一类：
+#   erp-agent-deploy  装到 /usr/local/sbin 由 bash 执行（CRLF → bad interpreter，
+#                     而且它失败的位置在生产机的 sudoers 里，最难排查）
+#   ghrunner.sudoers  由 sudo 解析（CRLF 会让规则本身失效 = 发布会提不了权）
+deploy/runner/erp-agent-deploy  text eol=lf
+*.sudoers                  text eol=lf
 # 刻意不写 *.yaml：src/agent 下 3 个 yaml 目前是 CRLF，而它们是 PyYAML 读的
 # （CRLF 无害），纳入进来只会产生一次无意义的整文件 diff。
 *.conf                     text eol=lf

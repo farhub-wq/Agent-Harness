@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# 发布闸门 —— self-hosted runner（用户 ghrunner，非 root）**唯一**被允许提权的入口。
+#
+#   erp-agent-deploy deploy   production sha-<12位hex> <40位hex> \
+#                             [--soak N] [--allow-infra-change] [--shadow-llm 0|1]
+#   erp-agent-deploy rollback production [--check]
+#   erp-agent-deploy status   production
+#
+# 为什么需要它（方案第二节在这里不完整，这是实地补齐的）：
+#   方案原文写的是「runner 不用 sudo 提权，sudoers 只放单条 systemctl 白名单」。
+#   但 deploy.sh 物理上必须 root：它要 rsync --chown=root:root 写进 /root/erp-agent
+#   （/root 是 0700）、读 deploy/.env（600）、写 deploy/cd/state/（root 属主，
+#   那是回滚真值源）。所以「非 root runner」与「发布要动生产树」之间必须有
+#   一个受控的提权点，这个脚本就是那一个点。
+#
+# 它做三件事，每件都是为了让 sudoers 那条 `NOPASSWD: /usr/local/sbin/erp-agent-deploy`
+# 不成为一个通用的 root shell：
+#   1. 参数白名单。tag 只接受 sha-<12位小写hex>，sha 只接受 40 位小写 hex，
+#      env 只接受 production。非法形状直接 exit 64，不 exec 任何东西。
+#   2. 生产树路径写死。不接受环境变量覆盖 —— sudo 默认 env_reset，本来也传不进来。
+#   3. 生产密钥（冒烟口令、通知 webhook）从 /etc/erp-agent/*.env 读（root 600），
+#      **不经过 runner 的进程环境**。runner 从头到尾没有机会看到它们。
+#
+# 装到 /usr/local/sbin/erp-agent-deploy，属主 root:root 0755 —— ghrunner 只读，
+# 改不了。这一点是这套设计成立的前提：如果 ghrunner 能写这个文件，它就能写
+# 任意 root 命令，白名单就形同虚设。deploy/runner/install-runner.sh 会断言这一点。
+set -euo pipefail
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+PROD_ROOT=/root/erp-agent
+SECRET_DIR=/etc/erp-agent
+SELF=erp-agent-deploy
+
+die() { printf '\033[31m%s: %s\033[0m\n' "$SELF" "$1" >&2; exit "${2:-64}"; }
+note() { printf '%s: %s\n' "$SELF" "$*"; }
+
+[ "$(id -u)" -eq 0 ] \
+    || die "必须以 root 运行 —— 它是 sudoers 白名单里的命令，由 ghrunner 通过 sudo 调起，不要手工执行"
+
+usage() {
+    sed -n '2,10p' "$0" >&2
+}
+
+# 参数个数先兜底。上限按最全的组合算，别拍一个看起来够用的数：
+#   deploy:  4 固定 + --soak N(2) + --shadow-llm N(2) + --allow-infra-change(1) = 9
+# 曾经写成 8，症状是「勾了 allow_infra_change 的发布 100% 失败，不勾的全好」——
+# deploy.yml 恰好就是传满 9 个参数的那条路径。
+# 加新标志时要一起改这里（上限太紧会拦住合法调用，太松就失去了兜底的意义）。
+[ "$#" -ge 1 ] || { usage; exit 64; }
+[ "$#" -le 10 ] || { usage; exit 64; }
+
+ACTION="$1"
+ENV_NAME=""
+TAG=""
+SHA=""
+SOAK=0
+ALLOW_INFRA=0
+CHECK_ONLY=0
+SHADOW_LLM=1
+
+case "$ACTION" in
+    deploy)
+        [ "$#" -ge 4 ] || { usage; exit 64; }
+        ENV_NAME="${2:-}"
+        TAG="${3:-}"
+        SHA="${4:-}"
+
+        [ "$ENV_NAME" = "production" ] \
+            || die "只允许 production（收到 '$ENV_NAME'）。v2 只有一套栈。"
+        # 镜像 tag 由 build.yml 生成，形状固定。收紧到 ^sha-[0-9a-f]{12}$ 之后，
+        # 参数里不可能藏进 ':'、'/'、'..' 之类能被 compose 或 docker 解释的东西。
+        [[ "$TAG" =~ ^sha-[0-9a-f]{12}$ ]] \
+            || die "tag 形状非法：'$TAG'。只接受 sha-<12 位小写 hex>（例：sha-79c3c3a1b2c3）"
+        [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || die "sha 形状非法：'$SHA'。只接受完整 40 位小写 hex（短 sha 不行：回滚要按它取源码树）"
+
+        shift 4
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --soak)
+                    [ "$#" -ge 2 ] || die "--soak 缺参数"
+                    [[ "${2:-}" =~ ^[0-9]{1,4}$ ]] || die "--soak 不是 0..9999 的整数：'${2:-}'"
+                    SOAK="$2"
+                    shift 2
+                    ;;
+                --allow-infra-change)
+                    ALLOW_INFRA=1
+                    shift
+                    ;;
+                --shadow-llm)
+                    [ "$#" -ge 2 ] || die "--shadow-llm 缺参数"
+                    case "${2:-}" in
+                        0|1) SHADOW_LLM="$2" ;;
+                        *)   die "--shadow-llm 只接受 0 或 1（收到 '${2:-}'）" ;;
+                    esac
+                    shift 2
+                    ;;
+                *)
+                    die "未知参数 '$1'"
+                    ;;
+            esac
+        done
+        ;;
+    rollback)
+        [ "$#" -le 3 ] || { usage; exit 64; }
+        ENV_NAME="${2:-}"
+        [ "$ENV_NAME" = "production" ] || die "只允许 production（收到 '$ENV_NAME'）"
+        MODE="${3:-}"
+        case "$MODE" in
+            "")         CHECK_ONLY=0 ;;
+            "--check")  CHECK_ONLY=1 ;;
+            *)          die "rollback 只接受可选的 --check（收到 '$MODE'）" ;;
+        esac
+        ;;
+    status)
+        [ "$#" -le 2 ] || { usage; exit 64; }
+        ENV_NAME="${2:-production}"
+        [ "$ENV_NAME" = "production" ] || die "只允许 production（收到 '$ENV_NAME'）"
+        ;;
+    ""|-h|--help|help)
+        usage
+        exit 0
+        ;;
+    *)
+        die "未知动作 '$ACTION'"
+        ;;
+esac
+
+# ---------------------------------------------------------------- 生产密钥
+# 这两个文件都是 root:root 0600。**不是**从 runner 的环境变量读的 —— 这是刻意的：
+# 生产 secrets 一旦经过 runner 的进程环境，就等于放在了一个「跑着 main 分支代码、
+# 且在 docker 组里」的用户手里。放在这里，runner 只有 sudo 一次的机会，拿不到内容。
+#
+# 文件不存在不是错误：smoke.env 缺失时 deploy.sh 会自己告警说「前端与 /api 链路
+# **未验证**」，那比悄悄跳过要诚实。
+load_secret_file() {
+    local f="$1"
+    [ -r "$f" ] || return 0
+    # 只接受 KEY=VALUE 行；出现命令替换/反引号就拒绝加载（文件本来就只有 root
+    # 能写，这是防止「有人把 shell 片段误存进来，然后被 root 执行」）。
+    if grep -qE '\$\(|`' "$f"; then
+        die "$f 里有命令替换，拒绝加载。这个文件应当只含 KEY=VALUE。"
+    fi
+    set -a
+    # shellcheck disable=SC1090
+    . "$f"
+    set +a
+}
+
+load_secret_file "$SECRET_DIR/smoke.env"
+load_secret_file "$SECRET_DIR/notify.env"
+
+# 审计：journald 里留一条，事后能对上「哪次发布是 runner 触发的」。
+logger -t "$SELF" -- "action=$ACTION env=$ENV_NAME tag=${TAG:-} sha=${SHA:-} soak=$SOAK infra=$ALLOW_INFRA by=$(id -un)" 2>/dev/null || true
+
+[ -d "$PROD_ROOT" ] || die "找不到生产树 $PROD_ROOT"
+[ -f "$PROD_ROOT/deploy/cd/deploy.sh" ] || die "$PROD_ROOT/deploy/cd/deploy.sh 不存在"
+
+export DEPLOYED_BY="github-actions"
+export CD_SOAK_SECONDS="$SOAK"
+export CD_ALLOW_INFRA_CHANGE="$ALLOW_INFRA"
+export CD_SHADOW_LLM="$SHADOW_LLM"
+
+case "$ACTION" in
+    deploy)
+        note "deploy $ENV_NAME tag=$TAG sha=$SHA soak=${SOAK}s infra=$ALLOW_INFRA"
+        exec bash "$PROD_ROOT/deploy/cd/deploy.sh" deploy "$ENV_NAME" "$TAG" "$SHA"
+        ;;
+    rollback)
+        if [ "$CHECK_ONLY" = "1" ]; then
+            note "rollback $ENV_NAME --check"
+            exec bash "$PROD_ROOT/deploy/cd/deploy.sh" rollback "$ENV_NAME" --check
+        fi
+        note "rollback $ENV_NAME"
+        exec bash "$PROD_ROOT/deploy/cd/deploy.sh" rollback "$ENV_NAME"
+        ;;
+    status)
+        note "status $ENV_NAME"
+        exec bash "$PROD_ROOT/deploy/cd/status.sh" "$ENV_NAME"
+        ;;
+esac
