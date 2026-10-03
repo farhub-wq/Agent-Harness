@@ -1,6 +1,10 @@
 # ============ 环境变量（含 API Key，严禁提交） ============
 .env
 .env.*
+# 任何位置的 *.env（deploy/nginx.env、deploy/dr/backup.env…）。上面两条只挡
+# 根目录与「点开头」的形态，挡不住 deploy/dr/backup.env 这种 —— 而它装着 OSS
+# 的 AccessKey。宁可多挡一层：.env 这类文件一旦进历史，删文件是不够的。
+*.env
 !.env.example
 !.env.sample
 

@@ -327,7 +327,7 @@ cd_assert_synced() {
              deploy/.env.example deploy/nginx.env.example deploy/nginx/nginx.conf \
              deploy/nginx/templates/internal_token.conf.template \
              deploy/cd/lib.sh deploy/cd/deploy.sh deploy/cd/package.filter \
-             deploy/dr/backup.sh \
+             deploy/dr/backup.sh deploy/dr/offsite.sh deploy/dr/ossutil-install.sh \
              src/agent/main_agent.py; do
         [ -e "$CD_REPO_ROOT/$f" ] || missing="$missing $f"
     done
