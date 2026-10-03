@@ -27,6 +27,22 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 RUNNER_TOKEN=<令牌> bash /root/erp-agent/deploy/runner/install-runner.sh
 ```
 
+**生产机拉不到 runner 的发布产物**（实测 `github.com/actions/runner/releases/download/*`
+是 000 / 15s 超时，而 `api.github.com` 0.3s、`codeload.github.com` 1.0s —— 被挡的
+只有这一条路）。所以在生产机上直接跑会卡在下载那一步：
+
+```bash
+# 在能上网的机器上
+curl -fsSL -o /tmp/actions-runner-linux-x64-2.337.0.tar.gz \
+  https://github.com/actions/runner/releases/download/v2.337.0/actions-runner-linux-x64-2.337.0.tar.gz
+sha256sum /tmp/actions-runner-linux-x64-2.337.0.tar.gz
+scp /tmp/actions-runner-linux-x64-2.337.0.tar.gz root@<prod>:/root/
+
+# 生产机上
+RUNNER_TOKEN=<令牌> RUNNER_TARBALL=/root/actions-runner-linux-x64-2.337.0.tar.gz \
+  bash /root/erp-agent/deploy/runner/install-runner.sh
+```
+
 重复跑是安全的：已注册的机器不带 `RUNNER_TOKEN` 再跑一次，只会更新闸门、
 sudoers、限额和 builder，然后重启服务。
 
