@@ -95,6 +95,46 @@ dr_mongo_eval() {
         'mongosh "$MONGODB_URI" --quiet --eval "$1"' -- "$1"
 }
 
+# ---------------------------------------------------------------- 连接串：摘掉库名
+# mongodump **拒绝**「URI 里带库名」与 `--db=` 同时出现：
+#
+#   Invalid Options: Cannot specify different database in connection URI and
+#   command-line option — `erp_agent` was specified in the URI and
+#   `checkpointing_db` was specified in the --db option
+#
+# 而 MONGODB_URI 里恰好带着库名（`.../erp_agent?authSource=admin`），备份又必须
+# 逐库显式 `--db` —— 所以每一轮都会在**第一个非 URI 库**上当场退出。2026-10-03
+# 由 CI 的 backup-dr job 首次真跑时抓到；这条在计划里就是「只能在真机验」清单上
+# 的一项，现在有答案了。
+#
+# 摘除动作必须在**容器里**做：$MONGODB_URI 带口令，在宿主机上展开就等于把口令写进
+# `docker exec` 的 argv，宿主机的 `ps` 里就能看到 —— 那正是本文件开头那条性质要
+# 避免的事。所以下面存的**不是宿主机函数，而是一段在容器里执行的 shell 源码**；
+# 调用处把它拼在 `sh -c` 的正文前面（见 backup.sh 的 dr_dump_db）。
+#
+# 实现只用参数展开，不依赖 sed/awk：mongo 镜像里 /bin/sh 是 dash，而这个片段同时
+# 要在宿主机（CI 的 sh、开发机的 Git Bash）被桩测跑一遍，能少一个外部依赖就少一个。
+# 拆查询串刻意走 case 而不用 `${X#"$Y"}` 那种嵌套引号 —— 它在 bash 下没问题，但
+# 这个片段真正的执行环境是 dash，而嵌套引号在 `"${...}"` 里的行为是那种「本机测
+# 过了、换台机器才炸」的地方。口令里未编码的 `/` 不符合 RFC 3986，故
+# `${_dr_rest%%/*}` 不会切错。
+DR_MONGO_URI_NODB_SH='
+dr_uri_nodb() {
+    _dr_head=""
+    _dr_query=""
+    case "$MONGODB_URI" in
+        *\?*) _dr_head="${MONGODB_URI%%\?*}"; _dr_query="?${MONGODB_URI#*\?}" ;;
+        *)    _dr_head="$MONGODB_URI" ;;
+    esac
+    case "$_dr_head" in
+        *://*) ;;
+        *) printf %s "$MONGODB_URI"; return 0 ;;   # 不是 URI 形状，不猜，原样交出去
+    esac
+    _dr_rest="${_dr_head#*://}"        # [user:pass@]host[:port][/db]
+    printf %s "${_dr_head%%://*}://${_dr_rest%%/*}${_dr_query}"
+}
+'
+
 # 把一整段 JS 交给容器里的 mongosh，并且**要求它自己回一个哨兵**。
 #
 # 为什么不能只看退出码：`mongosh --eval` 遇到脚本里的异常时报什么退出码，随版本

@@ -118,6 +118,49 @@ drill_volume() {
 }
 
 # ---------------------------------------------------------------- 报告
+# 「真正恢复时怎么做」那一段。**用引号 heredoc 原样写**，不用 printf 转义：正文里
+# 全是 `$`、`${}` 和成对引号，转义过去之后写的人和读的人都要先在脑子里解一层，
+# 而这段字的目标读者是**半夜出事的人**。`@@X@@` 是占位符，展开在下面一行做。
+drill_recovery_howto() {
+    local dir="$1" report="$2" text
+    text="$(cat <<'EOF'
+# 1) 数据库：把每份 archive 灌回一个空的 mongo
+#    docker compose -f /root/erp-agent/docker-compose.yml up -d mongo
+#    for f in @@DIR@@/*.archive.gz; do
+#      docker compose -f /root/erp-agent/docker-compose.yml exec -T mongo sh -c '
+#        H="$MONGODB_URI"; Q=""
+#        case "$H" in *\?*) Q="?${H#*\?}"; H="${H%%\?*}" ;; esac
+#        R="${H#*://}"
+#        mongorestore --uri="${H%%://*}://${R%%/*}$Q" --archive --gzip --drop' < "$f"
+#    done
+#
+#    为什么不是简单的一句 mongorestore：
+#      a) 生产 mongo 开了认证。不带 --uri 的话它以「command insert requires
+#         authentication」失败 —— 而恢复现场没有第二次机会试错。
+#      b) MONGODB_URI 里带着库名，mongodump/mongorestore 会把 URI 里的库当成
+#         「只处理这个库」的选择器。直接用 "$MONGODB_URI" 的话，checkpointing_db
+#         那几份要么被灌进 erp_agent，要么什么都没做 —— 而且它不会报错。
+#         上面三行赋值就是把库名摘掉、同时保住 authSource。
+#         （2026-10-03：CI 首次真跑 backup-dr 时，mongodump 正是死在这个冲突上。
+#           改一处必须改两处。）
+#    规则与 deploy/dr/lib-dr.sh 的 DR_MONGO_URI_NODB_SH 相同，但**不是同一份
+#    文本** —— 那边还多一层「URI 形状不对就原样交出去」的兜底，这里为了让人看得
+#    懂省掉了。真改规则时两处都要动。
+#
+# 2) 卷：**先确认生产卷里确实没有要保下来的东西**，再解包
+#    docker run --rm -v @@PROJECT@@_download-data:/d -v @@DIR@@:/b:ro @@IMAGE@@ \
+#      tar -xzf /b/download-data.tar.gz -C /d
+#
+# 3) 起来了先跑 bash deploy/cd/status.sh，再看 @@REPORT@@
+EOF
+)"
+    text="${text//@@DIR@@/$dir}"
+    text="${text//@@REPORT@@/$report}"
+    text="${text//@@PROJECT@@/${PROJECT:-erp-agent}}"
+    text="${text//@@IMAGE@@/$(dr_mongo_image)}"
+    printf '%s' "$text"
+}
+
 drill_write_report() {
     local dir="$1" result="$2" started="$3"
     local db_secs="$4" vol_secs="$5" total="$6" db_log="$7"
@@ -141,18 +184,7 @@ drill_write_report() {
         printf 'MANIFEST %s 个库 / %s 个集合\n' "$dbs" "$colls"
         printf '\n## 卷\n%s\n' "$DRILL_NOTES"
         printf '\n## 数据库恢复自检（backup.sh --verify 的原样输出）\n%s\n' "$db_log"
-        printf '\n## 真正恢复时怎么做\n'
-        printf '# 1) 数据库：把每份 archive 灌回一个空的 mongo\n'
-        printf '#    docker compose -f /root/erp-agent/docker-compose.yml up -d mongo\n'
-        printf '#    for f in %s/*.archive.gz; do\n' "$dir"
-        printf '#      docker compose -f /root/erp-agent/docker-compose.yml exec -T mongo \\\n'
-        printf '#        mongorestore --archive --gzip --drop < "$f"\n'
-        printf '#    done\n'
-        printf '# 2) 卷：**先确认生产卷里确实没有要保下来的东西**，再解包\n'
-        printf '#    docker run --rm -v %s_download-data:/d -v %s:/b:ro %s \\\n' \
-            "${PROJECT:-erp-agent}" "$dir" "$(dr_mongo_image)"
-        printf '#      tar -xzf /b/download-data.tar.gz -C /d\n'
-        printf '# 3) 起来了先跑 bash deploy/cd/status.sh，再看 %s\n' "$report"
+        printf '\n## 真正恢复时怎么做\n%s\n' "$(drill_recovery_howto "$dir" "$report")"
     } > "$report"
     printf '%s\n' "$report"
 }

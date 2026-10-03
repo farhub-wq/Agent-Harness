@@ -53,6 +53,36 @@ for fn in dr_compare dr_prune dr_merge_counts dr_valid_name dr_write_manifest; d
 done
 [ "$FAIL" -eq 0 ] || { printf '\n装配失败，后面的用例没有意义\n' >&2; exit 1; }
 
+# ---------------------------------------------------------------- 连接串摘库名
+__section "dr_uri_nodb：mongodump 不许 URI 与 --db 同时给库名"
+# 这一节存在的理由就是它抓到过的那个 bug：MONGODB_URI 里带 `.../erp_agent`，
+# 备份又逐库传 `--db`，于是 mongodump 报
+#   Invalid Options: Cannot specify different database in connection URI and
+#   command-line option
+# 并在**第一个非 URI 库**上退出 —— 也就是备份从来没成功过。CI 首次真跑
+# backup-dr 时抓到（2026-10-03），本机没有 Docker daemon 是看不见它的。
+#
+# 被测的 dr_uri_nodb 活在**容器里**（见 lib-dr.sh 的 DR_MONGO_URI_NODB_SH），所以
+# 这里用 `sh` 起一个独立进程来喂它，而不是在宿主机 shell 里 source —— 后者测的
+# 是另一个解释器里的另一份代码。mongo:6.0 的 /bin/sh 是 dash，CI 上 sh 也是
+# dash，所以这一跑同时把「这个片段是不是真 POSIX」验掉了。
+uri_nodb() { MONGODB_URI="$1" sh -c "$DR_MONGO_URI_NODB_SH"'
+dr_uri_nodb'; }
+
+check "$(uri_nodb 'mongodb://root:pw@mongo:27017/erp_agent?authSource=admin')" \
+      'mongodb://root:pw@mongo:27017?authSource=admin' \
+      "带库名与查询串 → 库名摘掉、authSource 保留"
+check "$(uri_nodb 'mongodb://root:pw@mongo:27017/erp_agent')" \
+      'mongodb://root:pw@mongo:27017' "只有库名（拼读时最容易漏掉的一格）"
+check "$(uri_nodb 'mongodb://mongo:27017')" 'mongodb://mongo:27017' \
+      "本来没有库名 → 原样，且不能把 host 切掉"
+check "$(uri_nodb 'mongodb://mongo:27017/')" 'mongodb://mongo:27017' "尾部空库名"
+check "$(uri_nodb 'mongodb+srv://u:p@c.example.net/erp_agent?retryWrites=true')" \
+      'mongodb+srv://u:p@c.example.net?retryWrites=true' "srv 形式：加号不能被协议名切分吃掉"
+check "$(uri_nodb 'mongodb://h1:27017,h2:27017/erp_agent?replicaSet=rs0')" \
+      'mongodb://h1:27017,h2:27017?replicaSet=rs0' "多主机列表"
+check "$(uri_nodb 'mongo:27017')" 'mongo:27017' "不是 URI 形状 → 原样，不猜"
+
 # ---------------------------------------------------------------- 区间合成
 __section "dr_merge_counts：dump 前后两次读数 → 期望区间"
 T="$(__mk)"

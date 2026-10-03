@@ -29,6 +29,9 @@
 # 因此库清单必须**运行时枚举**，不能来自配置。这也是这里不用单个全库 archive
 # 的原因：`--uri` 里带库名时 mongodump 到底按不按它限定范围，我没有把握，而
 # 「没把握」在这里等于「可能少备份一个库」。逐库显式 --db 把这个不确定性删掉。
+# （代价：URI 里的库名必须同时摘掉，否则 mongodump 直接拒绝 `--db` —— 见
+#   dr_dump_db 与 lib-dr.sh 的 DR_MONGO_URI_NODB_SH。这一条是 CI 首次真跑
+#   backup-dr 时抓到的，不是推演出来的。）
 #
 # ---------------------------------------------------------------- 为什么自检是硬门槛
 # 没验过的备份是心理安慰，不是备份。自检的做法是把 dump 真的恢复进一个一次性
@@ -120,8 +123,14 @@ dr_dump_db() {
     local db="$1" out="$2"
     # --archive 不带 =文件名 时写 stdout，进度与报错走 stderr。
     # **不**在命令行上出现凭据：$MONGODB_URI 由容器自己的 shell 展开。
+    #
+    # `--uri="$(dr_uri_nodb)"` 而不是 `--uri="$MONGODB_URI"`：mongodump 不许 URI 里
+    # 的库名与 `--db` 并存，而 URI 里恰恰带着 `erp_agent`。dr_uri_nodb 的定义与
+    # 这么做的理由在 lib-dr.sh —— 它是**容器里**的函数，所以这里要把那段源码拼在
+    # sh -c 正文前面。
     if ! cd_compose exec -T -e BK_DUMP_DB="$db" "$CD_MONGO_SERVICE" sh -c \
-            'mongodump --uri="$MONGODB_URI" --db="$BK_DUMP_DB" --archive --gzip' > "$out"; then
+            "$DR_MONGO_URI_NODB_SH"'
+            mongodump --uri="$(dr_uri_nodb)" --db="$BK_DUMP_DB" --archive --gzip' > "$out"; then
         warn "mongodump $db 失败"
         return 1
     fi

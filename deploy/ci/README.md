@@ -53,7 +53,30 @@
 这三件事都不会报错，只会在真需要它的那一天暴露，而那天没有第二次机会。所以负向
 用例比正向用例更重要：**一个只会说「通过」的 fail-closed 自检就是安慰剂**。
 
-三个 `*-logic-test.sh` 跑在最前面（几秒钟出结果，且不需要 Docker）。它们覆盖的是
+## `backup-dr` 首次真跑就抓到了东西（2026-10-03）
+
+这个 job 存在的理由不是「多一道保险」，是**备份链路在本机根本跑不起来**：没有
+Docker daemon，`cd_assert_tools` 必然失败。所以它第一次执行的回报就是它自己的
+价值证明 —— 8 个 job 里只有它红，红的正是那条：
+
+```
+Invalid Options: Cannot specify different database in connection URI and command-line
+option — `erp_agent` was specified in the URI and `checkpointing_db` was specified in
+the --db option
+```
+
+`MONGODB_URI` 里带库名，备份又逐库传 `--db`，mongodump 直接拒绝。它死在**第一个
+非 URI 库**上，也就是 `checkpointing_db` —— 那条路径在真机上意味着「第一次发布
+没有备份」，而且不发布就不会暴露。修法见 `lib-dr.sh` 的 `DR_MONGO_URI_NODB_SH`
+与 `dr-logic-test.sh` 里新加的那 7 条用例。
+
+同一轮里另外两个「只能等 CI 才知道」的悬案也一起有了答案，而且都是好消息：
+`stack-smoke` 在境外 runner 上通过 daocloud 镜像站拉 `python:3.11-slim` **能用**；
+`auth-path` 也绿。所以那两个 job 从这一轮起不再是「写完没跑过」。
+
+## 三个 `*-logic-test.sh`
+
+它们跑在最前面（几秒钟出结果，且不需要 Docker）。覆盖的是
 端到端用例碰不到的解析/比较路径 —— 而且巡检那条**只有在 CI 里能被自动验证**：它的
 失效方式是「几天后悄悄不再告警」和「每次发布都发一条假告警」，两者在真机上都要等好
 几天才看得出来，而后者会让人把整套通知静音掉。它们抓到过真问题（见

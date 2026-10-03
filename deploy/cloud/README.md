@@ -119,10 +119,16 @@ docker compose restart backend            # 重启后端（沙箱不会丢，映
 docker compose down                       # 停栈（数据卷保留）
 docker compose up -d                      # 再起
 
-# 备份 Mongo
-docker compose exec -T mongo mongodump --uri="$MONGODB_URI" --archive=/tmp/dump.gz --gzip
-docker compose cp mongo:/tmp/dump.gz ./dump-$(date +%F).gz
+# 备份：**不要**手写 mongodump，用 deploy/dr 的那个
+bash deploy/dr/backup.sh
 ```
+
+**上面这行曾经是手写的 `mongodump --uri="$MONGODB_URI" --archive=…`，它是错的**：
+`MONGODB_URI` 里的库名会把 dump 限死在 `erp_agent`，而会话状态全在
+`checkpointing_db`（langgraph 的库默认值，不在任何配置里）—— 产物是好的、恢复也
+不报错，只是少了一整个库。`deploy/dr/backup.sh` 运行时枚举库、逐个 `--db` 备份、
+恢复进一次性容器逐集合比对文档数，不过就不算备份。详见
+[deploy/dr/README.md](../dr/README.md)。
 
 **改代码后更新**：本机重新 `pack.sh` → `scp` → 服务器上解压覆盖 → `docker compose up -d --build backend`。
 

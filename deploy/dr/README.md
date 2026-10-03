@@ -101,6 +101,21 @@ VOLUME erp-agent_download-data download-data.tar.gz <sha256> <字节数> <条目
 我没有把握，而「没把握」在这里等于「可能少备份一个库」。逐库显式 `--db` 把这个
 不确定性从设计里删掉。
 
+代价是**库名要同时从 URI 里摘掉**：mongodump 不允许 URI 里的库名与 `--db` 并存，
+而 `MONGODB_URI` 恰好带着 `.../erp_agent?authSource=admin`，于是它每次都死在
+**第一个非 URI 库**上：
+
+```
+Invalid Options: Cannot specify different database in connection URI and command-line
+option — `erp_agent` was specified in the URI and `checkpointing_db` was specified in
+the --db option
+```
+
+这不是推演出来的，是 2026-10-03 CI 的 `backup-dr` job 首次真跑时抓到的（本机没有
+Docker daemon，看不见它）。摘除逻辑是 `deploy/dr/lib-dr.sh` 的 `DR_MONGO_URI_NODB_SH`
+—— 它在**容器里**执行，因为 `$MONGODB_URI` 带口令，在宿主机上展开等于把口令写进
+`docker exec` 的 argv。恢复演练报告里的「真正恢复时怎么做」用的是同一条规则。
+
 **`COLL` 是一段区间而不是一个数。** 生产栈在备份期间仍在服务，dump 窗口里一定有人
 在写：dump 完成后再读计数可能得到 N+1 而 dump 里只有 N。等值比较会把一个完全健康的
 备份判成坏的，而这是发布路径上的硬门槛 —— 结果是每次有人正在聊天时发布都会中止。
@@ -352,8 +367,14 @@ HEARTBEAT_URL=https://hc-ping.com/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 
 下面是写这些脚本时**没有把握、只在文档里记着**的东西。第一次上真机时逐条确认：
 
-- `listDatabases` 在带认证的连接下是否需要额外权限（`clusterMonitor`？）；
-- `mongodump --uri`（带 `authSource=admin`）与 `--db` 同用时的实际行为；
 - OSS 内网 endpoint 的可达性与 ossutil 的真实报错形态；
 - 一次性 mongo 容器在 3.6G 机器上、生产栈在跑时的内存余量（自检限了 512m）；
 - 恢复演练的真实耗时，据此决定它要不要挂 timer。
+
+**已经验掉的**（原本也在这张单子上，2026-10-03 由 CI 的 `backup-dr` job 给出答案）：
+
+- `listDatabases` 在带 `authSource=admin` 的连接下**不需要**额外权限 —— 枚举出了
+  两个库，`erp_agent` 与 `checkpointing_db`，与设计假设一致；
+- `mongodump --uri` 与 `--db` 同用**会直接报错退出**（不是静默限定范围）。见上面
+  「一份备份长什么样」——这条是本仓库唯一一个「只在 CI 里才可能被发现」的 bug，
+  因为本机没有 Docker daemon，而它在真机上表现为**第一次发布就没有备份**。
