@@ -1,17 +1,37 @@
 # 从 conventional commits 生成版本号与 CHANGELOG。
 #
 # 触发点是 main 上的 push —— 没有 pull_request：这个 job 拿 contents: write，
-# 能用 GITHUB_TOKEN 建 tag、发 Release。让它对 fork PR 可达等于把写权限交给
-# 任何人。deploy/ci/lint-workflows.sh 会拦住这种改法。
+# 能建 tag、发 Release。让它对 fork PR 可达等于把写权限交给任何人。
+# deploy/ci/lint-workflows.sh 会拦住这种改法。
 #
 # 它做两件事，**都不直接碰生产**：
 #   1. 有值得发版的提交时，开一个 "chore(main): release X.Y.Z" 的 PR（改
 #      version 相关文件 + CHANGELOG）。人 review 合并。
-#   2. 这个 PR 被合并后，在下一次 push 上用 GITHUB_TOKEN 打 vX.Y.Z tag、
-#      发 GitHub Release。tag 推送触发 build.yml。
+#   2. 这个 PR 被合并后，在下一次 push 上打 vX.Y.Z tag、发 GitHub Release。
+#      tag 推送触发 build.yml。
 #
 # 所以"发版"这个动作实际是：合并 release PR → 自动打 tag → 自动构建。
 # 换不换生产仍然要人在 deploy.yml 上点一次并审批（见 deploy.yml）。
+#
+# ---------------------------------------------------------------- 为什么用 PAT
+# 第 1 步那个 PR **不能**用 GITHUB_TOKEN 开。GITHUB_TOKEN 开的 PR 触发不了 ci.yml：
+# 2026-10-03 实测它会被扣成一个 `conclusion: action_required` 且 **jobs 为空**的
+# run（不是失败，是等人点 "Approve and run"）。而 main 的分支保护要求那 8 个 check
+# 全部通过 —— 于是**每个 release PR 都要人工点一次**才能合并，而这一步既不是 review
+# 也不是审批，纯粹是机器在给机器让路。
+#
+# 所以第 1 步用一个 fine-grained PAT（secret 名 RELEASE_PLEASE_TOKEN）：它建的 PR
+# 落成**真人署名**，ci.yml 正常触发。第 2 步的 tag/Release 也一并由它署名。
+#
+# 两条要知道的代价：
+#   - PAT **会过期**。过期后这个 job 红在 "Bad credentials"，不是静默失败 ——
+#     但仍然要记得换（建的时候顺手记个到期日）。
+#   - 它绕过了"Actions 不许建 PR"的仓库开关，所以那个开关可以**关回去**
+#     （`can_approve_pull_request_reviews: false`）。关着更好：本仓库的分支保护
+#     现在不要求批准，但哪天要求了，那个开关就等于让 CI 自己批自己。
+#
+# 权限（fine-grained，只给这一个仓库）：Contents: Read and write、
+# Pull requests: Read and write。Metadata 是必带的只读项。
 name: release-please
 
 on:
@@ -19,6 +39,9 @@ on:
     branches: [main]
 
 permissions:
+  # 实际用的凭据是下面的 RELEASE_PLEASE_TOKEN（见文件头）。这两行留着是给
+  # 「secret 没配 / 已过期」那种情形兜底：那时 action 会用 GITHUB_TOKEN，至少
+  # 能跑起来并在日志里说清楚是权限不够，而不是先死在 checkout 上。
   contents: write
   # release-please 需要开 PR 并更新它
   pull-requests: write
@@ -43,3 +66,7 @@ jobs:
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          # secret 没有时显式退回 GITHUB_TOKEN（`||` 不是修辞，不写它 action 会
+          # 拿到空串）。退回去等于又回到"PR 被扣住"那个症状 —— 会退化成要人工点，
+          # 但不会把 main 弄红。见文件头。
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
