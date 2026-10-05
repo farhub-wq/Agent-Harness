@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/farhub-wq/Agent-Harness/compare/v1.0.0...v1.0.1) (2026-10-05)
+
+
+### CI
+
+* **release:** tag 去掉 erp-agent 前缀（include-component-in-tag: false） ([11fd795](https://github.com/farhub-wq/Agent-Harness/commit/11fd7952af102ad63d3edbff1d06b5e5fe261913))
+
 ## 1.0.0 (2026-10-03)
 
 
