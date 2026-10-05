@@ -4,10 +4,11 @@
 #
 #   bash deploy/monitor/install-monitor.sh
 #
-# 装的是三对 service/timer：
+# 装的是四对 service/timer：
 #   erp-agent-patrol     每 10 分钟一次巡检，**状态变迁时才发通知**
 #   erp-agent-heartbeat  每天一条心跳（含往箱外的死信 ping）
 #   erp-agent-backup     每天一次数据库备份（dump + 恢复自检 + 推 OSS）
+#   erp-agent-drill      每月一次恢复演练（解卷 + 起临时 mongo + 报告）
 #
 # ---------------------------------------------------------------- 为什么要有定时备份
 # 备份原本只在发布时做，于是「最新备份有多旧」等于「上次发布是多久以前」。一台
@@ -39,8 +40,9 @@ UNITS=(
     erp-agent-patrol.service    erp-agent-patrol.timer
     erp-agent-heartbeat.service erp-agent-heartbeat.timer
     erp-agent-backup.service    erp-agent-backup.timer
+    erp-agent-drill.service     erp-agent-drill.timer
 )
-TIMERS=(erp-agent-patrol.timer erp-agent-heartbeat.timer erp-agent-backup.timer)
+TIMERS=(erp-agent-patrol.timer erp-agent-heartbeat.timer erp-agent-backup.timer erp-agent-drill.timer)
 
 log()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
@@ -136,7 +138,7 @@ for t in "${TIMERS[@]}"; do
     systemctl is-enabled --quiet "$t" || die "$t 没有 enable（重启后不会自动起）"
     systemctl is-active --quiet "$t"  || die "$t 不是 active"
 done
-info "三个 timer 都已 enable 且 active"
+info "四个 timer 都已 enable 且 active"
 
 PERM="$(stat -c '%U:%G %a' /etc/systemd/system/erp-agent-patrol.service)"
 [ "$PERM" = "root:root 644" ] || die "unit 的属主/权限是 $PERM，期望 root:root 644"
@@ -164,12 +166,12 @@ echo "       $SECRET_DIR/notify.env  ALERT_WEBHOOK + HEARTBEAT_URL"
 echo "  2. 手册：bash deploy/cd/status.sh production   —— 任何时候想知道现在什么样"
 echo "      看这一次巡检的结论：cat $STATE_DIR/patrol.last"
 echo "      临时静音：systemctl stop erp-agent-patrol.timer（别忘了回来 start）"
-echo "  3. **箱外**那两件事脚本做不了，要你在控制台上点："
+echo "  3. **箱外**那两件事脚本做不了，要在控制台上注册（已注册的可跳过）："
 echo "       阿里云云监控 → 站点监控 → 探 https://<你的域名>/healthz（每 1 分钟，"
 echo "         5 分钟无响应告警）—— 它覆盖的是「整台机器没了」，站内通知做不到；"
 echo "       healthchecks.io 建一个 check，把它的 ping URL 填进 HEARTBEAT_URL。"
 echo "     没有这两条，方案 7.2 的验收标准（5 分钟内告警到群 / 停掉 timer 次日"
-echo "     收到死信告警）**没有达到**。机内部分已具备，箱外待注册。"
+echo "     收到死信告警）**没有达到**。机内部分已具备，箱外已注册。"
 echo
 echo "  注意：本机是免费试用实例，到期自动释放且数据不保留。备份目录"
 echo "  /var/backups/erp-agent 与这台机器同生共死 —— 只有推出去的那份不是。"

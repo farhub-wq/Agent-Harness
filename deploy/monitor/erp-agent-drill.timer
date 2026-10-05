@@ -1,0 +1,17 @@
+[Unit]
+Description=erp-agent 月度恢复演练
+
+[Timer]
+# 每月 1 号 03:47（非整点，理由同 backup.timer / heartbeat.timer —— 避开 cron
+# 整点峰、避开 03:17 的备份与 05:07 的心跳）。选月初：备份保留 7 天，而月频的
+# 演练验证的是「最近至少有一份能恢复的备份」这条链路，不依赖某具体那一份。
+OnCalendar=*-*-01 03:47:00
+# 机器在 03:47 关着时开机后补做一次。恢复演练漏一个月不算少一份可恢复的数据
+#（备份是每天做的），但「演练长期没跑过」意味着恢复链路从未被验证 ——
+# Persistent 让它开机后至少追一次。
+Persistent=true
+AccuracySec=1min
+Unit=erp-agent-drill.service
+
+[Install]
+WantedBy=timers.target

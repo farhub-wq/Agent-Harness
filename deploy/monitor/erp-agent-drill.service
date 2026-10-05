@@ -1,0 +1,17 @@
+[Unit]
+Description=erp-agent 月度恢复演练（restore-drill.sh）
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/bin/bash /root/erp-agent/deploy/dr/restore-drill.sh
+
+# 恢复演练要解一份完整的卷、起一个临时 mongo（限死 512m），在 2 核 3.6G 的机器上
+# 耗时可能在分钟到小时之间。7200s（2 小时）是给数据量长大之后留的余量 —— 被 systemd
+# 从中间砍掉会留下一个半截的临时容器和卷，而 restore-drill.sh 自己的清理逻辑
+#（trap / EXIT）只在正常退出时跑。见 deploy/dr/restore-drill.sh 里的说明。
+TimeoutStartSec=7200
+Nice=10
+IOSchedulingClass=idle

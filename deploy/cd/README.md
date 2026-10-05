@@ -194,10 +194,20 @@ digest、版本号、可用空间，因为它们每次发布都会变，拿全�
 ## 尚未实现
 
 - **可观测（阶段 6）**：没有指标/日志聚合，观察窗只看容器健康与日志尾部。
-- **箱外告警**：`/healthz` 被改坏后 5 分钟内告警到群、以及「巡检 timer 被停掉」这两
-  条验收标准都要在控制台注册（阿里云云监控站点监控 / healthchecks.io 死信）——
-  代码路径已经就位（心跳的 `HEARTBEAT_URL`），注册那两下要人工点。见
-  [deploy/dr/README.md](../dr/README.md) 的「这次做不到的两件事」。
-- **构建失败的通知**：`build.sh` 以 `ghrunner` 身份跑，读不到 root 600 的
-  `/etc/erp-agent/notify.env`，所以构建失败**不发飞书**，只在 Actions 页面与
-  GitHub 通知邮件里可见。要让构建也发通知，得再开一个提权面，暂时不值得。
+
+## 已补全
+
+以下几项曾经是「尚未实现」，现在都已落地：
+
+- **构建失败的通知**：`build.yml` 末尾有一个 `if: failure()` 的通知 step，webhook URL
+  从仓库 Secret `BUILD_NOTIFY_WEBHOOK` 注入（与 `RELEASE_PLEASE_TOKEN` 同级管理），
+  不经过提权面、不读 root 文件。格式与 `notify.sh` 的飞书/企微/钉钉 payload 一致，
+  按 URL 的 host 自动选通道。success / cancelled 不通知。
+- **恢复演练 timer**：`deploy/monitor/erp-agent-drill.timer`，每月 1 号 03:47 跑
+  `restore-drill.sh`，`install-monitor.sh` 会一并安装。`Persistent=true` 避免漏跑，
+  `TimeoutStartSec=7200`（2 小时），且脚本自身会跳过发布期（`cd_deploy_in_flight`）。
+- **箱外告警**：阿里云云监控站点监控与 healthchecks.io 死信 ping 均已在控制台注册，
+  `HEARTBEAT_URL` 已填入 `notify.env`。机内巡检与箱外死信两条链路都通。
+- **tag 前缀**：`release-please-config.json` 配了 `include-component-in-tag: false`，
+  打出的 tag 是 `vX.Y.Z` 而非 `erp-agent-vX.Y.Z`，与 `build.yml` 的 `v[0-9]*.[0-9]*.[0-9]*`
+  触发条件匹配。

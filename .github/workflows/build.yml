@@ -103,3 +103,64 @@ jobs:
               echo "下一步：dispatch \`deploy.yml\`，version=$VERSION（需要 production 环境审批）。"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------------------------------------------------------------- 构建失败通知
+      # build.sh 以 ghrunner 身份跑，读不到 root 600 的 /etc/erp-agent/notify.env，
+      # 所以构建失败不发飞书。这里在 GitHub Actions 层补一道通知：webhook URL 从
+      # 仓库 Secret BUILD_NOTIFY_WEBHOOK 注入（与 RELEASE_PLEASE_TOKEN 同级管理），
+      # 不经过提权面、不读 root 文件。
+      #
+      # 只在 failure() 时跑：success 由摘要 step 体现，cancelled() 是人工取消不告警。
+      # 通知格式复用 notify.sh 的飞书/企微/钉钉 JSON payload 形状，但内联在这里
+      #（不 source notify.sh —— 它会回落到 /etc/erp-agent/notify.env，在 runner
+      #  进程环境里没有它时不会出错，但那套文件在 ghrunner 下根本不可读）。
+      - name: 构建失败通知
+        if: failure()
+        env:
+          WEBHOOK: ${{ secrets.BUILD_NOTIFY_WEBHOOK }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -uo pipefail
+          [ -n "${WEBHOOK:-}" ] || { echo "BUILD_NOTIFY_WEBHOOK 未配，跳过通知"; exit 0; }
+
+          # webhook URL 的 host 段决定通道格式：飞书 open.feishu、企微 qyapi.weixin、
+          # 钉钉 oapi.dingtalk。三家的 text payload 形状一致，只有外层信封不同。
+          # generic 路径兜住 server酱以外的任何 URL（发一个 JSON body）。
+          TEXT="❌ 构建失败
+版本：${VERSION:-未知}
+仓库：$REPO
+触发者：$ACTOR
+ Actions：https://github.com/$REPO/actions/runs/$RUN_ID
+时间：$(date -u '+%F %T UTC')"
+
+          # JSON 转义：优先 python3，不可用时兜底删掉反斜杠和引号、换行折空格。
+          # 与 notify.sh 的 json_escape 同一思路 —— 这里不能 source 它，原因见上。
+          json_escape() {
+            local s="$1" out
+            if command -v python3 >/dev/null 2>&1; then
+              out="$(printf '%s' "$s" | python3 -c \
+                'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read()))' 2>/dev/null || true)"
+              [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+            fi
+            printf '"%s"' "$(printf '%s' "$s" | tr -d '\r\\"' | tr '\n' ' ')"
+          }
+
+          case "$WEBHOOK" in
+            *open.feishu*)
+              payload="{\"msg_type\":\"text\",\"content\":{\"text\":$(json_escape "$TEXT")}}" ;;
+            *qyapi.weixin*|*oapi.dingtalk*)
+              payload="{\"msgtype\":\"text\",\"text\":{\"content\":$(json_escape "$TEXT")}}" ;;
+            *)
+              payload="{\"event\":\"build_failed\",\"text\":$(json_escape "$TEXT")}" ;;
+          esac
+
+          resp="$(curl -sS --max-time 15 -X POST "$WEBHOOK" \
+            -H 'Content-Type: application/json' -d "$payload" 2>&1)" && rc=0 || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::构建失败通知发送失败（curl exit=$rc）：$resp"
+          else
+            printf '构建失败通知已发送：%s\n' "$(printf '%s' "$resp" | head -c 200)"
+          fi
