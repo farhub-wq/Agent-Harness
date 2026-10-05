@@ -21,6 +21,26 @@
 
 ---
 
+## 2026-10-05 更新
+
+本次补全 CI/CD 链路的最后几块拼图：构建失败通知、恢复演练自动化、箱外告警注册。
+
+- **构建失败通知**：`build.yml` 末尾新增 `if: failure()` 的通知 step。`build.sh` 以 `ghrunner` 身份跑，读不到 root 600 的 `/etc/erp-agent/notify.env`，之前构建失败只在 Actions 页面可见。现在 webhook URL 从仓库 Secret `BUILD_NOTIFY_WEBHOOK` 注入（与 `RELEASE_PLEASE_TOKEN` 同级管理），不经过提权面、不读 root 文件。通知格式复用 `notify.sh` 的飞书/企微/钉钉 JSON payload 形状，按 URL host 自动选通道。`success` / `cancelled()` 不通知（避免噪声）。
+- **恢复演练月度 timer**：新增 `deploy/monitor/erp-agent-drill.service` + `erp-agent-drill.timer`，每月 1 号 03:47 自动跑 `restore-drill.sh`。`install-monitor.sh` 一并安装。`Persistent=true` 避免漏跑，`TimeoutStartSec=7200`（2 小时），脚本自身跳过发布期（`cd_deploy_in_flight`）不与发布抢内存。之前这段是「先在真机上跑一次看耗时再决定频率」，现在按月频落地——备份保留 7 天，月频足够验证恢复链路。
+- **箱外告警已注册**：阿里云云监控站点监控（探 `/healthz`，每 1 分钟，5 分钟无响应告警）与 healthchecks.io 死信 ping 均已在控制台注册，`HEARTBEAT_URL` 已填入 `notify.env`。机内巡检与箱外死信两条链路都通。
+- **tag 前缀修复**：`release-please-config.json` 配了 `include-component-in-tag: false`，打出的 tag 是 `vX.Y.Z` 而非 `erp-agent-vX.Y.Z`，与 `build.yml` 的 `v[0-9]*.[0-9]*.[0-9]*` 触发条件匹配。
+
+> 尚未实现：可观测（阶段 6），不在这次范围内。
+
+## 2026-10-03 更新（阶段 5）
+
+发布前的数据库关卡与机内巡检已落地，见 [deploy/dr/](deploy/dr/) 与 [deploy/monitor/](deploy/monitor/)。
+
+- **数据库备份**：运行时**枚举**库（不是读配置）→ 逐库 dump → 恢复自检 → 剪枝 → 外推阿里云 OSS。这套应用用了**两个** Mongo 库而配置里只看得到一个（`checkpointing_db` 是 `langgraph-checkpoint-mongodb` 的库默认值，装的是全部会话状态与 HITL 待审批状态），所以「按 `MONGODB_URI` 里的库名 dump」会整段丢掉会话历史且**不报任何错**。另外 `download-data` 卷（用户生成的报告文件，Mongo 里没有它们的索引）也一并备份 —— `deploy/README.md` 原先写的「只有 Mongo 需要备份」是错的，已修正。
+- **自检是硬门槛**：把 dump 真的恢复进一个一次性 mongo 容器（限死 512m / 缓存 0.25G），逐集合比对**文档数区间**（不是集合个数 —— 空库和「恢复成功但内容为空」长得一模一样）。没过的备份不算备份，发布中止。
+- **迁移**：只前进、无 down 迁移，按 sha256 记账（内容变了就停住）。跑在「备份之后、同步之前」，所以失败时生产一个字节都没动过 —— 退出码 **8**。
+- **机内巡检**：每 10 分钟跑一次 `status.sh`，把结果压成 `(id, OK/FAIL)` 对与上一次比，**只在状态变迁时通知**（一天 144 次的提醒等于没有提醒，几天后就会被静音，而一套被静音的通知比没有通知更糟）。外加每日心跳与箱外死信 ping —— 那是「巡检 timer 被偷偷停掉」唯一能被发现的方式。
+
 ## 2026-10-02 更新
 
 本次补上「发布与回滚」，并修掉一个会挡住前端镜像构建的错误。
@@ -31,16 +51,6 @@
 - **真机实测的停机窗口**：正常换版 **44s**、坏版本自动回滚 **134s**（其中约 100s 是 compose 自己探测 `depends_on` 健康条件失败）、镜像没换时的同版本重发布只要 **4s**。`backend` 必须单副本（沙箱注册表与会话是进程内状态），所以每次换版必然停机，SSE 实断约 20s。
 - **两条不能碰的死线**（写在 `lib.sh` 的 `cd_compose()` 里，是代码而不是注释）：`docker compose down` 会重建网络，破坏 `mcp-sandbox` 静态 IP 与沙箱内 `/etc/hosts` 的一致性，沙箱内所有 MCP 工具挂掉；`docker compose prune` / `rm` 会删掉未被运行容器引用的镜像，也就是**全部历史版本**，回滚能力瞬间归零且不可逆。同理，**永远不要在部署机上跑 `docker system prune -a`**。
 - **修复前端镜像的构建阻塞**：`frontend/Dockerfile` 的 `COPY --from=build /app/public ./public` 在源路径不存在时会**直接让构建失败**（不是跳过、不是警告）。上一条 `Delete frontend/public directory` 把 `create-next-app` 的 5 个占位 svg 删掉、整个目录随之消失后，前端镜像就再也构建不出来。加一个 `RUN mkdir -p public` 兜住，仓库里有没有 `public/` 都能构建。
-
-> **2026-10-03 更新（阶段 5）**：发布前的数据库关卡与机内巡检已落地，见 [deploy/dr/](deploy/dr/) 与 [deploy/monitor/](deploy/monitor/)。
->
-> - **数据库备份**：运行时**枚举**库（不是读配置）→ 逐库 dump → 恢复自检 → 剪枝 → 外推阿里云 OSS。这套应用用了**两个** Mongo 库而配置里只看得到一个（`checkpointing_db` 是 `langgraph-checkpoint-mongodb` 的库默认值，装的是全部会话状态与 HITL 待审批状态），所以「按 `MONGODB_URI` 里的库名 dump」会整段丢掉会话历史且**不报任何错**。另外 `download-data` 卷（用户生成的报告文件，Mongo 里没有它们的索引）也一并备份 —— `deploy/README.md` 原先写的「只有 Mongo 需要备份」是错的，已修正。
-> - **自检是硬门槛**：把 dump 真的恢复进一个一次性 mongo 容器（限死 512m / 缓存 0.25G），逐集合比对**文档数区间**（不是集合个数 —— 空库和「恢复成功但内容为空」长得一模一样）。没过的备份不算备份，发布中止。
-> - **迁移**：只前进、无 down 迁移，按 sha256 记账（内容变了就停住）。跑在「备份之后、同步之前」，所以失败时生产一个字节都没动过 —— 退出码 **8**。
-> - **机内巡检**：每 10 分钟跑一次 `status.sh`，把结果压成 `(id, OK/FAIL)` 对与上一次比，**只在状态变迁时通知**（一天 144 次的提醒等于没有提醒，几天后就会被静音，而一套被静音的通知比没有通知更糟）。外加每日心跳与箱外死信 ping —— 那是「巡检 timer 被偷偷停掉」唯一能被发现的方式。
-> - **没做到的**：可观测（阶段 6）暂不在这次范围内。箱外告警（阿里云云监控站点监控 + healthchecks.io 死信）已在控制台注册，代码路径与注册都到位。
->
-> 尚未实现：可观测（阶段 6）。换版前的影子启动与观察窗、部署机上的 self-hosted runner 与配套的发布流水线、构建失败通知（`build.yml` 的 `if: failure()` step，webhook URL 从仓库 Secret `BUILD_NOTIFY_WEBHOOK` 注入）、恢复演练月度 timer（`deploy/monitor/erp-agent-drill.timer`，每月 1 号跑 `restore-drill.sh`）均已落地，见下面两节。
 
 ### CI 门禁：8 个 job，PR 上必过
 
