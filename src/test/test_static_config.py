@@ -19,6 +19,9 @@
 6. nginx worker 固定为非特权用户 `nginx`，且 htpasswd 必须 644、nginx.env 必须
    显式带 `TLS_ENABLED=` 空行 —— 由 bootstrap（新装机）与 deploy/cd（老实例升级）
    两处共同兜住。这两处没兜住时整站「一登录就 500、/healthz 却 200」。
+   另：nginx.conf 的 :443 server 无条件加载 TLS 证书，纯 HTTP 场景路径上也得有占位 ——
+   CI 集成栈不跑 bootstrap/deploy，由 deploy/ci/prepare-stack.sh 自签一份，否则两个
+   集成 job 都会卡在等 nginx healthy 超时（smoke-edge 420s / stack-smoke 600s）。
 
 第 2 条的运行时对照在 `deploy/ci/smoke-edge.sh`（集成 job）。这里只做**结构**
 断言 —— 它能抓住"删了一行 header"，抓不住"proxy_pass 指到了错的端口"，后者
@@ -37,6 +40,7 @@ COMPOSE = REPO / "docker-compose.yml"
 LIB_SH = REPO / "deploy" / "cd" / "lib.sh"
 DEPLOY_SH = REPO / "deploy" / "cd" / "deploy.sh"
 BOOTSTRAP_SH = REPO / "deploy" / "cloud" / "bootstrap.sh"
+PREPARE_STACK_SH = REPO / "deploy" / "ci" / "prepare-stack.sh"
 NGINX_CONF = REPO / "deploy" / "nginx" / "nginx.conf"
 NGINX_TEMPLATE = REPO / "deploy" / "nginx" / "templates" / "internal_token.conf.template"
 TLS_TEMPLATE = REPO / "deploy" / "nginx" / "templates" / "tls.conf.template"
@@ -318,6 +322,7 @@ class TestNginxAuthRuntimeFiles(unittest.TestCase):
     def setUpClass(cls):
         cls.conf = _read(NGINX_CONF)
         cls.bootstrap = _read(BOOTSTRAP_SH)
+        cls.prepare = _read(PREPARE_STACK_SH)
         cls.lib = _read(LIB_SH)
         cls.deploy = _read(DEPLOY_SH)
         cls.nginx_env_example = _read(NGINX_ENV_EXAMPLE)
@@ -377,6 +382,24 @@ class TestNginxAuthRuntimeFiles(unittest.TestCase):
             "cd_ensure_nginx_auth_and_switch", apply_body,
             "兜底函数必须在 cd_apply_and_verify 的 up -d 前调用（该函数被正常发布与回滚两路复用）",
         )
+
+    def test_prepare_stack_generates_tls_placeholder_cert(self):
+        # 占位证书契约的第三条路径：bootstrap 管装机、deploy/cd 管老实例升级、
+        # prepare-stack.sh 管 CI 集成栈。CI 走纯 HTTP（TLS_ENABLED= 空）又不跑
+        # bootstrap/deploy，没人生成证书；少这一步 nginx 加载配置即 emerg，两个集成
+        # job 全卡在等 healthy 超时，认证 / 沙箱断言一条都跑不到 —— 用结构断言在
+        # PR 上秒级拦住，不必等集成栈十几分钟超时。
+        self.assertIn(
+            "deploy/nginx/tls", self.prepare,
+            "prepare-stack.sh 必须准备 deploy/nginx/tls 目录（compose 只读挂进容器）",
+        )
+        self.assertRegex(
+            self.prepare, r"openssl\s+req\s+-x509",
+            "prepare-stack.sh 必须用 openssl req -x509 自签占位证书，与 "
+            "cd_ensure_nginx_tls_cert 保持同一契约",
+        )
+        self.assertIn("cert.pem", self.prepare)
+        self.assertIn("key.pem", self.prepare)
 
 
 class TestEnvTemplates(unittest.TestCase):

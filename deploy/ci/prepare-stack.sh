@@ -3,7 +3,7 @@
 #
 #   bash deploy/ci/prepare-stack.sh
 #
-# 生成四个文件（**全部在 .gitignore 里，永不入库**）：
+# 生成四类配置 + 一份占位证书（**全部在 .gitignore 里，永不入库**）：
 #   deploy/.env                    从 deploy/.env.example 派生，填随机 Mongo 口令、
 #                                  CI 专用的假 LLM Key、以及本次生成的共享密钥
 #   deploy/nginx.env               从 deploy/nginx.env.example 派生，写**同一个**
@@ -11,6 +11,11 @@
 #   deploy/nginx/htpasswd          Basic Auth 口令（明文不存在别处，只留在
 #                                  .ci-credentials.sh 里供冒烟脚本使用）
 #   deploy/ci/.ci-credentials.sh   上面三个值，供 smoke-edge.sh / stack-smoke.sh 读
+#   deploy/nginx/tls/{cert,key}.pem  自签 TLS 占位证书。CI 走纯 HTTP（nginx.env 里
+#                                  TLS_ENABLED= 空），但 nginx.conf 的 :443 server
+#                                  **无条件**加载该路径，缺了它 nginx master 加载配置
+#                                  就 emerg、容器永远 restarting —— 两个集成 job 都会
+#                                  卡在等 healthy 超时。与 deploy/cd 的占位证书同契约。
 #
 # 为什么用随机值而不是写死：写死的话"两处不一致时应该 401"这类断言就退化成
 # "常量等于常量"，永远绿。随机值让每次运行都是一次真实的一致性验证。
@@ -134,7 +139,29 @@ chmod 600 "$ENV_FILE" "$NGINX_ENV_FILE" "$CRED_FILE"
 # 的也是 644 —— 这里跟着它，不要"顺手加固"。
 chmod 644 "$HTPASSWD"
 
-info "$ENV_FILE / $NGINX_ENV_FILE / $HTPASSWD 已生成"
+# ---------------------------------------------------------------- nginx TLS 占位证书
+# nginx.conf 的 :443 server **无条件**写了 ssl_certificate /etc/nginx/tls/cert.pem：
+# 该指令在 master 加载配置期就解析路径，跟 TLS_ENABLED 开关是不是空无关。CI 这里是
+# 纯 HTTP（上面 nginx.env 里 TLS_ENABLED= 空），又不跑 bootstrap.sh / deploy.sh，
+# 没人生成证书 —— 不补这一份，nginx 一启动就 emerg（cannot load certificate
+# ".../tls/cert.pem": No such file or directory），容器一直 restarting，smoke-edge
+# 等 420s、stack-smoke 等 600s 双双超时，而且认证 / 沙箱断言一条都跑不到。
+#
+# 用**同一条** openssl（RSA2048 / 3650 天 / CN=localhost），与
+# deploy/cd/lib.sh 的 cd_ensure_nginx_tls_cert 保持一个契约，别在这里发散。
+# compose 以**目录**挂 ./deploy/nginx/tls:/etc/nginx/tls:ro，无单文件挂载的 inode 坑。
+TLS_DIR="$REPO/deploy/nginx/tls"
+mkdir -p "$TLS_DIR"
+if [ ! -s "$TLS_DIR/cert.pem" ] || [ ! -s "$TLS_DIR/key.pem" ]; then
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+        -keyout "$TLS_DIR/key.pem" -out "$TLS_DIR/cert.pem" \
+        -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost" >/dev/null 2>&1 \
+        || ci_die "自签 nginx TLS 占位证书失败（openssl req -x509）"
+fi
+# 证书由 master(root) 加载期读取（worker 不自行 open），600 即可，与 cd 那份占位一致。
+chmod 600 "$TLS_DIR/cert.pem" "$TLS_DIR/key.pem"
+
+info "$ENV_FILE / $NGINX_ENV_FILE / $HTPASSWD 已生成（另有 $TLS_DIR 占位证书）"
 info "Basic Auth 用户：$BASIC_USER"
 info "共享密钥前 8 位：$(printf '%s' "$TOKEN" | cut -c1-8)…（两处已写成同一个值）"
 info "口令留在 $CRED_FILE，冒烟脚本从那里读"
