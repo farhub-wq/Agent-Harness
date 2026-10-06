@@ -4,7 +4,7 @@
 #   bash deploy/cd/status.sh [production]
 #   echo $?     # 0 = 全绿，1 = 有问题
 #
-# 它回答六个问题：
+# 它回答八个问题：
 #   1) 七个服务都在跑且 healthy 吗
 #   2) 跑着的镜像和 state 文件记的是同一版吗（不一致 = 有人绕过脚本手工 up）
 #   3) 有发布卡在半途吗
@@ -12,6 +12,7 @@
 #   5) 磁盘还够吗
 #   6) 回滚能力还具备吗（prev 快照 + 旧镜像 + 源码树都还在吗）
 #   7) 备份还在吗、新鲜吗、推出去过吗
+#   8) Prometheus / Grafana 在跑吗（cd_soak 查错误率的前提）
 #
 # ---------------------------------------------------------------- 输出格式是接口
 # 每一行都是 `[OK] <id>: <给人看的细节>` 或 `[FAIL] <id>: <细节>`。**id 是稳定的
@@ -41,7 +42,9 @@ else
     # 一次性服务 sandbox-image-loader 跑完就退出，不算异常。
     ps_out="$(cd_compose ps --all --format '{{.Service}}\t{{.Image}}\t{{.State}}\t{{.Health}}' 2>/dev/null || true)"
     if [ -n "$ps_out" ]; then
-        expected="mongo dind mock-erp mcp backend frontend nginx"
+        # 9 个服务：7 个核心 + prometheus + grafana（阶段 6 加的可观测栈）。
+        # sandbox-image-loader 是一次性服务，上面已跳过。
+        expected="mongo dind mock-erp mcp backend frontend nginx prometheus grafana"
         while IFS=$'\t' read -r svc img state health; do
             case "$svc" in sandbox-image-loader|"") continue ;; esac
             expected="$(printf '%s\n' $expected | grep -vx "$svc" | tr '\n' ' ')"
@@ -188,6 +191,47 @@ else
                 *)   bad offsite "$(sed -n '1,4p' "$marker" | tr '\n' ' ')" ;;
             esac
         fi
+    fi
+fi
+
+# ---------------------------------------------------------------- 8. 可观测
+head_ 可观测
+# Prometheus 与 Grafana 是阶段 6 落地的可观测栈。巡检它们不是「多一条检查」，
+# 而是「cd_soak 查 Prometheus 错误率」这条判据的前提 —— Prometheus 挂了，soak
+# 的错误率查询就是 0/0，会假绿。所以这里先验活，soak 里才敢信它的返回值。
+ps_svc="$(cd_compose ps --format '{{.Service}} {{.Health}}' 2>/dev/null \
+    | grep -E '^prometheus ' || true)"
+if [ -z "$ps_svc" ]; then
+    bad prometheus "compose 里没有 prometheus 服务，或它还没起来"
+else
+    health="$(printf '%s' "$ps_svc" | awk '{print $2}')"
+    if [ "$health" = "healthy" ]; then
+        # 进一步验：/-/healthy 返回 200 才算真活着（compose healthcheck 也是探它，
+        # 这里是从宿主机侧再探一次，覆盖 healthcheck 自身配置错误的情况）。
+        prom_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+            "http://127.0.0.1:9090/-/healthy" 2>/dev/null || true)"
+        # 注意：prometheus 不在 edge 网络上，宿主机直连 9090 可能连不到。
+        # 这种情况下退回 compose healthcheck 的结论。
+        if [ "$prom_code" = "200" ] || [ -z "$prom_code" ]; then
+            ok prometheus "healthy"
+        else
+            bad prometheus "healthcheck 说 healthy 但 /-/healthy 返回 $prom_code"
+        fi
+    else
+        bad prometheus "state=$health（期望 healthy）"
+    fi
+fi
+
+gf_svc="$(cd_compose ps --format '{{.Service}} {{.Health}}' 2>/dev/null \
+    | grep -E '^grafana ' || true)"
+if [ -z "$gf_svc" ]; then
+    bad grafana "compose 里没有 grafana 服务，或它还没起来"
+else
+    health="$(printf '%s' "$gf_svc" | awk '{print $2}')"
+    if [ "$health" = "healthy" ]; then
+        ok grafana "healthy"
+    else
+        bad grafana "state=$health（期望 healthy）"
     fi
 fi
 

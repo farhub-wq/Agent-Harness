@@ -22,6 +22,10 @@
 - /deploy/.env
 - /deploy/nginx.env
 - /deploy/nginx/htpasswd
+- /deploy/nginx/tls/
+# Prometheus / Grafana 运行时数据 —— 同步时受保护，不被删也不被覆盖
+- /deploy/prometheus/data/
+- /deploy/grafana/data/
 # 阶段 5 的 OSS 凭据。它的**真实位置**是生产机的 /etc/erp-agent/backup.env
 # （root 0600），根本不在仓库里；这条是给"有人在 deploy/dr/ 下留了一份"兜底。
 - /deploy/dr/backup.env

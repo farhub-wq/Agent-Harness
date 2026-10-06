@@ -233,6 +233,9 @@ cd_lock() {
 
 # ---------------------------------------------------------------- 镜像坐标
 # 无 registry：镜像就在本机 docker daemon 里（构建机 == 运行机）。
+# 有 registry：镜像名前面加 REGISTRY_URL/ 前缀，build.sh --push 推上去，deploy.sh
+# 在 up 之前 docker pull 拉下来。留空 = 完全本地模式（机器丢 = 镜像全丢 + 回滚归零）。
+#
 # tag 用不可变的 sha-<12>；语义化 tag（vX.Y.Z）只是给人看的标签。
 # 镜像名的**唯一**出处。build.sh（CI，构建并打 tag）和 deploy.sh（生产机，换版）
 # 必须对同一个名字达成一致 —— 不一致的表现是构建成功了但发布说"本机没有这个镜像"，
@@ -241,11 +244,26 @@ CD_APP_IMAGE_NAME=erp-agent-app
 CD_FRONTEND_IMAGE_NAME=erp-agent-frontend
 CD_MOCK_IMAGE_NAME=erp-mock
 
+# registry 前缀从 deploy/.env 的 REGISTRY_URL 读。**只在这里读一次**：build.sh
+# 和 deploy.sh 都 source lib.sh，各自再读一遍迟早漂（一处加斜杠一处没加）。
+# 留空时所有镜像名不加前缀，行为与引入 registry 支持之前完全一致。
+cd_registry_prefix() {
+    local url
+    url="$(sed -n 's/^REGISTRY_URL=//p' "$CD_REPO_ROOT/deploy/.env" 2>/dev/null | head -1 | tr -d '"'"'"'')"
+    # 去掉末尾斜杠再加一个：registry URL 形如 registry.cn-hangzhou.aliyuncs.com，
+    # 也可能带 namespace（registry.../my-ns）。统一处理成 "prefix/" 形式。
+    url="${url%/}"
+    [ -n "$url" ] && printf '%s/' "$url"
+}
+
 cd_image_refs() {
-    local tag="$1"
-    export APP_IMAGE="$CD_APP_IMAGE_NAME:$tag"
-    export FRONTEND_IMAGE="$CD_FRONTEND_IMAGE_NAME:$tag"
-    export MOCK_ERP_IMAGE="$CD_MOCK_IMAGE_NAME:$tag"
+    local tag="$1" prefix
+    prefix="$(cd_registry_prefix)"
+    export APP_IMAGE="${prefix}${CD_APP_IMAGE_NAME}:$tag"
+    export FRONTEND_IMAGE="${prefix}${CD_FRONTEND_IMAGE_NAME}:$tag"
+    export MOCK_ERP_IMAGE="${prefix}${CD_MOCK_IMAGE_NAME}:$tag"
+    export CD_HAS_REGISTRY=0
+    [ -n "$prefix" ] && export CD_HAS_REGISTRY=1
 }
 
 cd_all_images() { printf '%s\n' "$APP_IMAGE" "$FRONTEND_IMAGE" "$MOCK_ERP_IMAGE"; }
@@ -367,6 +385,9 @@ cd_assert_synced() {
              deploy/dr/offsite.sh deploy/dr/ossutil-install.sh deploy/dr/migrate.sh \
              deploy/dr/restore-drill.sh \
              deploy/monitor/patrol.sh \
+             deploy/prometheus/prometheus.yml \
+             deploy/grafana/provisioning/datasources.yml \
+             deploy/grafana/provisioning/dashboards.yml \
              src/agent/main_agent.py; do
         [ -e "$CD_REPO_ROOT/$f" ] || missing="$missing $f"
     done
@@ -553,12 +574,109 @@ cd_diagnose() {
 # 它存在的理由是约束 A 里那个数字：坏版本一旦走到换版，停机窗口是 ~134s
 #（compose 探测依赖失败 ~100s + 回滚 ~40s）。影子阶段拦下的故障，生产一秒都不用停。
 #
-# 为什么**不**接 sandbox 网络、不设 DOCKER_HOST、不挂 docker.sock：
+# 为什么**不**接 sandbox 网络、不设 DOCKER_HOST、不挂 docker.sock（原始行为）：
 # 让第二个 backend 进程碰到 dind，它的 prune_orphans() 会无条件删掉所有
 # erp-sandbox-warm-*（见 README 架构约束 B）—— 影子启动会把生产的预热池清空，
 # 自己把自己变成一次故障。docker 不可达时那两条启动路径都是优雅降级的
 #（prune 打一行 warning 后 return 0，ensure_warm_pool 逐容器 catch），所以影子
 # 容器照常起得来，验证的也正好是"除沙箱外的一切"。
+#
+# == 沙箱链路验证（CD_SHADOW_SANDBOX=1，默认关） ==
+# 开启时影子启动**额外**用一个独立 compose project 起一个临时 dind，
+# 在里面跑沙箱容器创建 + 代码执行。它**不碰**：
+#   - 生产的 dind（erp-agent_dind_1）—— 用独立 project 的 dind
+#   - 生产预热池（erp-sandbox-warm-*）—— 独立 dind 里的容器和生产 dind 隔离
+#   - mcp-sandbox 网络 —— 临时 dind 不接 mcp-sandbox
+# 代价：多起一个 dind 容器（~256m），验证完即销毁。开关默认关：沙箱链路较稳，
+# 多一个 dind 让影子启动从 ~30s 变成 ~120s，不值得每次都付。
+cd_shadow_sandbox() {
+    local shadow_name="$1" timeout="${CD_SHADOW_SANDBOX_TIMEOUT:-120}"
+    local proj="erp-shadow-sandbox-$$"
+    local dind_name="${proj}-dind-1"
+    local net="${proj}_default"
+    local rc=0
+
+    log "影子沙箱验证（独立 project $proj，不碰生产 dind / 预热池）"
+
+    # 起一个临时 dind：用独立 network，不接 mcp-sandbox。
+    # --privileged 是 dind 的硬需求，与生产 dind 一致。
+    if ! docker run -d --name "$dind_name" \
+            --privileged \
+            --network "$net" \
+            -e DOCKER_TLS_CERTDIR="" \
+            -v /tmp:/tmp:ro \
+            docker:27-dind \
+            --storage-driver=overlay2 --mtu=1400 >/dev/null 2>&1; then
+        # 网络可能不存在，先建一个
+        docker network create "$net" >/dev/null 2>&1 || true
+        if ! docker run -d --name "$dind_name" \
+                --privileged \
+                --network "$net" \
+                -e DOCKER_TLS_CERTDIR="" \
+                -v /tmp:/tmp:ro \
+                docker:27-dind \
+                --storage-driver=overlay2 --mtu=1400 >/dev/null 2>&1; then
+            warn "影子沙箱：临时 dind 起不来"
+            return 1
+        fi
+    fi
+
+    # 等 dind 就绪
+    local waited=0
+    while [ "$waited" -lt "$timeout" ]; do
+        if docker exec "$dind_name" docker info >/dev/null 2>&1; then
+            info "影子沙箱：dind 就绪（${waited}s）"
+            break
+        fi
+        sleep 3
+        waited=$((waited + 3))
+    done
+    if [ "$waited" -ge "$timeout" ]; then
+        warn "影子沙箱：dind ${timeout}s 内没就绪"
+        docker rm -f "$dind_name" >/dev/null 2>&1 || true
+        docker network rm "$net" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    # 在临时 dind 里拉沙箱镜像 + 跑一个容器 + 执行代码。
+    # 这三步覆盖了沙箱链路的核心路径：daemon 可达 → 容器创建 → 代码执行。
+    # 不接 MCP 网络：影子阶段只验「沙箱能跑代码」，不验「沙箱能调 MCP」（那是
+    # 换版后的冒烟 + 集成测试的事）。
+    local sandbox_img
+    sandbox_img="$(sed -n 's/^SANDBOX_IMAGE=//p' "$CD_REPO_ROOT/deploy/.env" 2>/dev/null | head -1 | tr -d '"'"'"'')"
+    sandbox_img="${sandbox_img:-python:3.11-slim}"
+
+    info "影子沙箱：pull $sandbox_img"
+    if ! docker exec "$dind_name" docker pull "$sandbox_img" >/dev/null 2>&1; then
+        warn "影子沙箱：pull $sandbox_img 失败（dind 出网有问题？）"
+        docker rm -f "$dind_name" >/dev/null 2>&1 || true
+        docker network rm "$net" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    # 起一个沙箱容器并执行代码：echo + python 一行。两个断言：
+    #   1. 容器能创建（docker run 成功）
+    #   2. 代码能在里面执行（python 输出预期值）
+    local out
+    out="$(docker exec "$dind_name" docker run --rm \
+        --read-only --tmpfs /tmp:rw,size=64m --memory=256m --cpus=0.5 \
+        "$sandbox_img" \
+        python -c 'print("shadow-sandbox-ok")' 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ] || ! printf '%s' "$out" | grep -q 'shadow-sandbox-ok'; then
+        warn "影子沙箱：沙箱容器创建或代码执行失败："
+        printf '%s\n' "$out" | tail -10 >&2
+        docker rm -f "$dind_name" >/dev/null 2>&1 || true
+        docker network rm "$net" >/dev/null 2>&1 || true
+        return 1
+    fi
+    info "影子沙箱：沙箱容器创建 + 代码执行通过"
+
+    # 清理
+    docker rm -f "$dind_name" >/dev/null 2>&1 || true
+    docker network rm "$net" >/dev/null 2>&1 || true
+    return 0
+}
+
 cd_shadow() {
     local timeout="${CD_SHADOW_TIMEOUT:-180}"
     local name="erp-shadow-$(date +%s)-$$"
@@ -628,6 +746,17 @@ cd_shadow() {
     fi
 
     docker exec "$name" python /tmp/shadow_probe.py || rc=1
+
+    # 沙箱链路验证（CD_SHADOW_SANDBOX=1 时）。在影子容器主探针之后、清理之前：
+    # 影子容器还在跑时做沙箱验证，用完后一起清理。
+    if [ "${CD_SHADOW_SANDBOX:-0}" = "1" ]; then
+        if ! cd_shadow_sandbox "$name"; then
+            warn "影子沙箱验证未通过"
+            rc=1
+        fi
+    else
+        info "影子沙箱验证跳过（CD_SHADOW_SANDBOX 未设 1）"
+    fi
 
     if [ "$rc" -ne 0 ]; then
         warn "影子容器日志尾部："

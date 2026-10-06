@@ -27,9 +27,13 @@ IMAGE_KEEP="${IMAGE_KEEP:-5}"
 
 # 镜像名从 lib.sh 取（CD_*_IMAGE_NAME），不在这里重写一遍 —— 名字只有在
 # 「构建时打的 tag」和「发布时找的 tag」完全一致时才有意义。
-APP_IMAGE_NAME="$CD_APP_IMAGE_NAME"
-FRONTEND_IMAGE_NAME="$CD_FRONTEND_IMAGE_NAME"
-MOCK_IMAGE_NAME="$CD_MOCK_IMAGE_NAME"
+# registry 前缀也来自 lib.sh（cd_registry_prefix）：留空时镜像名不加前缀，
+# 行为与引入 registry 支持之前完全一致。
+APP_IMAGE_NAME="${CD_APP_IMAGE_NAME}"
+FRONTEND_IMAGE_NAME="${CD_FRONTEND_IMAGE_NAME}"
+MOCK_IMAGE_NAME="${CD_MOCK_IMAGE_NAME}"
+REGISTRY_PREFIX="$(cd_registry_prefix)"
+[ -n "$REGISTRY_PREFIX" ] && info "registry 模式：前缀 $REGISTRY_PREFIX（构建后 --push）"
 
 cd "$CD_REPO_ROOT"
 
@@ -112,6 +116,7 @@ docker buildx inspect "$BUILDER" >/dev/null 2>&1 \
 
 build_image() {
     # build_image <镜像名> <上下文> <Dockerfile>
+    # 镜像名已含 registry 前缀（由调用方拼接），这里只负责构建 + 打 tag。
     local name="$1" context="$2" dockerfile="$3"
     info "构建 $name（context=$context）"
     # --builder 指到带限额的那个：宿主 daemon 的默认构建器跑在 docker.service 的
@@ -149,26 +154,50 @@ retag_from_running() {
     return 0
 }
 
+# registry 模式下把三个镜像推上去。--load 已经把它们打进本地 daemon 了，
+# 这里用 docker push 推到 registry。推失败不 die —— 本地镜像仍在，发布可以
+# 走本地模式（deploy.sh 的 docker pull 会因为找不到远程镜像而跳过，退化成本地）。
+# 但要 warn：不推成功，新机器上 docker pull 会 404，远程发布退化。
+push_to_registry() {
+    [ "${CD_HAS_REGISTRY:-0}" = "1" ] || return 0
+    local name
+    for name in "$MOCK_FULL" "$APP_FULL" "$FRONT_FULL"; do
+        info "推送 $name:$TAG_SHA"
+        docker push "$name:$TAG_SHA" >/dev/null 2>&1 \
+            || { warn "push $name:$TAG_SHA 失败 —— 本地镜像仍在，但远程发布会退化"; return 1; }
+        info "推送 $name:$VERSION"
+        docker push "$name:$VERSION" >/dev/null 2>&1 \
+            || { warn "push $name:$VERSION 失败"; return 1; }
+    done
+    info "三个镜像已推到 $REGISTRY_PREFIX"
+}
+
+# 带 registry 前缀的完整镜像名（构建 / push / pull 都用它）
+APP_FULL="${REGISTRY_PREFIX}${APP_IMAGE_NAME}"
+FRONT_FULL="${REGISTRY_PREFIX}${FRONTEND_IMAGE_NAME}"
+MOCK_FULL="${REGISTRY_PREFIX}${MOCK_IMAGE_NAME}"
+export CD_HAS_REGISTRY="${CD_HAS_REGISTRY:-0}"
+
 # ---------------------------------------------------------------- 构建
 if [ "$need_mock" = 1 ]; then
-    build_image "$MOCK_IMAGE_NAME" "./deploy/mock-erp" "./deploy/mock-erp/Dockerfile"
+    build_image "$MOCK_FULL" "./deploy/mock-erp" "./deploy/mock-erp/Dockerfile"
 else
-    retag_from_running mock-erp "$MOCK_IMAGE_NAME" \
-        || build_image "$MOCK_IMAGE_NAME" "./deploy/mock-erp" "./deploy/mock-erp/Dockerfile"
+    retag_from_running mock-erp "$MOCK_FULL" \
+        || build_image "$MOCK_FULL" "./deploy/mock-erp" "./deploy/mock-erp/Dockerfile"
 fi
 
 if [ "$need_app" = 1 ]; then
-    build_image "$APP_IMAGE_NAME" "." "./Dockerfile"
+    build_image "$APP_FULL" "." "./Dockerfile"
 else
-    retag_from_running backend "$APP_IMAGE_NAME" \
-        || build_image "$APP_IMAGE_NAME" "." "./Dockerfile"
+    retag_from_running backend "$APP_FULL" \
+        || build_image "$APP_FULL" "." "./Dockerfile"
 fi
 
 if [ "$need_front" = 1 ]; then
-    build_image "$FRONTEND_IMAGE_NAME" "./frontend" "./frontend/Dockerfile"
+    build_image "$FRONT_FULL" "./frontend" "./frontend/Dockerfile"
 else
-    retag_from_running frontend "$FRONTEND_IMAGE_NAME" \
-        || build_image "$FRONTEND_IMAGE_NAME" "./frontend" "./frontend/Dockerfile"
+    retag_from_running frontend "$FRONT_FULL" \
+        || build_image "$FRONT_FULL" "./frontend" "./frontend/Dockerfile"
 fi
 
 # ---------------------------------------------------------------- 断言
@@ -176,7 +205,7 @@ fi
 # erp-agent-frontend:sha-xxx" —— 那时已经动过生产树了。构建阶段断言比发布阶段
 # 断言便宜得多：此刻生产还没被碰。
 log "断言三个镜像都在本地且指向同一个 digest"
-for name in "$MOCK_IMAGE_NAME" "$APP_IMAGE_NAME" "$FRONTEND_IMAGE_NAME"; do
+for name in "$MOCK_FULL" "$APP_FULL" "$FRONT_FULL"; do
     id_sha="$(cd_image_id "$name:$TAG_SHA")"
     id_ver="$(cd_image_id "$name:$VERSION")"
     [ -n "$id_sha" ] || die "$name:$TAG_SHA 不存在 —— buildx --load 没把它导进宿主 daemon"
@@ -227,10 +256,19 @@ prune_repo() {
         fi
     done < <(docker image ls "$repo" --format '{{.CreatedAt}}\t{{.ID}}\t{{.Tag}}' | sort -r)
 }
-prune_repo "$APP_IMAGE_NAME"
-prune_repo "$FRONTEND_IMAGE_NAME"
-prune_repo "$MOCK_IMAGE_NAME"
+prune_repo "$APP_FULL"
+prune_repo "$FRONT_FULL"
+prune_repo "$MOCK_FULL"
 unset running_ids
+
+# ---------------------------------------------------------------- 推送
+# registry 模式：构建完成后统一 push。--load 已经打进本地 daemon 了，这里推。
+# 推失败只 warn 不 die：本地镜像仍在，deploy.sh 的 docker pull 找不到远程镜像
+# 时会退化成本地模式（见 deploy.sh 的 cd_pull_images）。
+if [ "${CD_HAS_REGISTRY:-0}" = "1" ]; then
+    log "推送镜像到 registry（$REGISTRY_PREFIX）"
+    push_to_registry
+fi
 
 # 构建缓存会吃满 40G 磁盘。keep-storage 是**上限**，超了才回收。
 log "回收 buildx 缓存（保留 6G）"

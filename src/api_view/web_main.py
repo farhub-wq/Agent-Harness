@@ -106,6 +106,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Prometheus 指标：/metrics 端点由 instrumentator 自动挂载，暴露
+# http_request_duration_seconds / http_requests_total 等，供 Prometheus 抓取。
+# 指标路径不认证（Prometheus 从 edge 网络内抓取，带不了 Basic Auth），
+# 但只暴露聚合计数，不含请求体或用户标识。
+from prometheus_fastapi_instrumentator import Instrumentator
+
+Instrumentator(
+    should_gauge=lambda handler: False,  # 不为每个 handler 单独建 gauge，控制基数
+).instrument(app).expose(
+    app,
+    endpoint="/metrics",
+    include_render_schema=False,  # 不暴露 OpenConfig，减少攻击面
+    tags={"component": "backend"},  # Prometheus relabel 用
+)
+
 # 注册路由
 app.include_router(chat_router)
 app.include_router(history_router)

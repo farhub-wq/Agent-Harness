@@ -1,0 +1,23 @@
+# Prometheus 抓取配置
+# 由 docker-compose.yml 的 prometheus 服务挂载为 /etc/prometheus/prometheus.yml
+#
+# scrape_interval 15s：与现有 healthcheck 间隔对齐，不给 backend 加额外压力。
+# 不抓 nginx（nginx:1.27-alpine 不自带 exporter，指标少且非核心）。
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # backend 的 /metrics 端点（prometheus-fastapi-instrumentator 暴露）
+  - job_name: "backend"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["backend:8000"]
+        labels:
+          service: "erp-agent-backend"
+
+  # Prometheus 自身
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]

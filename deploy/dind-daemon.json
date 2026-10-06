@@ -1,5 +1,6 @@
 {
   "registry-mirrors": [
     "https://docker.m.daocloud.io"
-  ]
+  ],
+  "seccomp-profile": "/etc/docker/seccomp.json"
 }

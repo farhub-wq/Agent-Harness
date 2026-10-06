@@ -1,0 +1,15 @@
+# 由 nginx 镜像入口脚本 20-envsubst-on-templates.sh 从环境变量生成
+# /etc/nginx/conf.d/tls.conf，不要手工编辑本文件以外的生成物。
+#
+# 唯一职责：给 nginx.conf 一个运行时开关 $tls_enabled。
+#   非空 = 启用 HTTPS：80 的非探活流量 301 到 443。
+#   留空（TLS_ENABLED 未设或为空）= 纯 HTTP，与没配 TLS 之前的行为完全一致
+#   （开发 / CI 场景）。
+#
+# 证书路径**不**走变量：nginx 的 ssl_certificate 在配置加载时解析路径，
+# 不支持运行时变量。证书始终在固定路径 /etc/nginx/tls/{cert,key}.pem，
+# 由 bootstrap.sh 生成（有域名走 certbot，否则 openssl 自签占位）——
+# 即使纯 HTTP 场景也生成一份，保证 nginx -t 永远过。
+#
+# 证书文件本身不在仓库里（.gitignore 排除了 deploy/nginx/tls/）。
+set $tls_enabled "${TLS_ENABLED}";

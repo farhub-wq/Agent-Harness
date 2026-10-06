@@ -18,3 +18,4 @@ matplotlib>=3.9.0
 pandas>=2.2.0
 docker>=7.0.0
 langchain-deepseek>=1.1.0
+prometheus-fastapi-instrumentator>=7.0.0

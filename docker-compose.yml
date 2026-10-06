@@ -54,6 +54,11 @@ services:
     <<: *logging
     restart: unless-stopped
     privileged: true
+    # P0-#3 加固：seccomp profile + userns-remap 都配在 dind-daemon.json 里
+    #（dind 内部 dockerd 读它），作用于 dind 内部创建的沙箱容器 —— 这才是
+    # 要加固的边界。privileged=true 暂不移除（移除会破坏 overlay2 存储驱动），
+    # seccomp/userns 是叠加的加固层。profile 保留了沙箱链路必需的
+    # clone/mount/setns，不影响容器创建与 /workspace 写入。
     command: ["--storage-driver=overlay2", "--mtu=1400"]
     environment:
       # 必须是空字符串：默认值会让 entrypoint 启用 TLS 并只监听 2376，
@@ -72,6 +77,9 @@ services:
       # sandbox-image-loader 卡在 docker pull python:3.11-slim 直到超时。
       # 镜像站不可达时 dockerd 会自动回退到 Docker Hub，所以留着无害。
       - ./deploy/dind-daemon.json:/etc/docker/daemon.json:ro
+      # seccomp profile 挂载到容器内，dind-daemon.json 的 seccomp-profile 指向它。
+      # 作用于 dind 内部创建的沙箱容器，限制它们能发起的 syscall。
+      - ./deploy/dind-seccomp.json:/etc/docker/seccomp.json:ro
     # mcp-sandbox 是沙箱内的代码够到 MCP 的唯一一跳：dind 转发 + MASQUERADE。
     # 详见 deploy/README.md「沙箱内访问 MCP」。
     networks: [sandbox, mcp-sandbox]
@@ -214,6 +222,61 @@ services:
       start_period: 20s
 
   # ============================================================
+  # 可观测性（阶段 6）
+  # ============================================================
+  # Prometheus 抓 backend 的 /metrics（prometheus-fastapi-instrumentator
+  # 暴露）。不抓 nginx（1.27-alpine 不自带 exporter，指标少且非核心）。
+  # 不接 edge 网络：Prometheus 只需够到 backend，不该有出网能力。
+  # 数据保留由 PROMETHEUS_RETENTION 控制（默认 15d），放 named volume
+  # 让重启不丢历史。
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    <<: *logging
+    restart: unless-stopped
+    env_file: [./deploy/.env]
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks: [data]
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}"
+      - "--web.listen-address=0.0.0.0:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  # Grafana 读 Prometheus 做可视化。dashboard 与 datasource 走 provisioning
+  #（deploy/grafana/provisioning/），开机即就绪、不需要手工配。
+  # 端口 13000 避开常用端口；GRAFANA_PASSWORD 留空时 bootstrap.sh 随机生成。
+  grafana:
+    image: grafana/grafana:11.4.0
+    <<: *logging
+    restart: unless-stopped
+    env_file: [./deploy/.env]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:-admin}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks: [edge]
+    ports:
+      - "${GRAFANA_PORT:-13000}:3000"
+    depends_on:
+      prometheus: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  # ============================================================
   # 统一入口
   # ============================================================
   nginx:
@@ -222,9 +285,12 @@ services:
     restart: unless-stopped
     ports:
       - "${HTTP_PORT:-80}:80"
-    # 独立的 env 文件：nginx 只需要 INTERNAL_AUTH_TOKEN，不该顺带拿到后端密钥。
-    # 文件含密钥、不入库，所以标 required: false —— 没建也能起来（等于不校验，
-    # backend 会在启动日志里打 WARNING）。容器部署应当先
+      # TLS 开启时（TLS_ENABLED=1）才需要从外部访问 443。留空时 compose
+      # 仍然映射但没人会从外面连进来 —— 不额外挡，靠 nginx 上的 if 控制。
+      - "${HTTPS_PORT:-443}:443"
+    # 独立的 env 文件：nginx 只需要 INTERNAL_AUTH_TOKEN 和 TLS_ENABLED，
+    # 不该顺带拿到后端密钥。文件含密钥、不入库，所以标 required: false ——
+    # 没建也能起来（等于不校验，backend 会在启动日志里打 WARNING）。容器部署应当先
     #   cp deploy/nginx.env.example deploy/nginx.env && sh deploy/set_internal_token.sh
     env_file:
       - path: ./deploy/nginx.env
@@ -239,6 +305,11 @@ services:
       # 报的不是"文件不存在"而是 "is a directory"，而且会在仓库里留下一个
       # 空目录。遇到就 rm -rf deploy/nginx/htpasswd 后按文档重新生成。
       - ./deploy/nginx/htpasswd:/etc/nginx/htpasswd:ro
+      # TLS 证书目录。bootstrap.sh 始终生成一份（certbot 真证书或自签占位），
+      # 保证 nginx.conf 里 ssl_certificate 的字面路径永远存在 —— 即使
+      # 纯 HTTP 场景也挂载，nginx -t 才不会因为找不到证书文件而失败。
+      # 目录在 .gitignore 里，不入库。
+      - ./deploy/nginx/tls:/etc/nginx/tls:ro
     networks: [edge]
     depends_on:
       backend:  { condition: service_healthy }
@@ -279,3 +350,5 @@ volumes:
   mongo-data:
   dind-data:
   download-data:
+  prometheus-data:
+  grafana-data:

@@ -38,6 +38,8 @@ usage() {
   CD_SOAK_SECONDS      换版后的观察窗长度，**默认 300**（5 分钟）。0 = 关闭。
   CD_SHADOW_TIMEOUT    影子容器等 /health 的上限，默认 180
   CD_SHADOW_LLM=0      跳过影子启动里的真实 LLM 调用（默认 1，会真打一次 LLM API）
+  CD_SHADOW_SANDBOX=1  额外在独立 dind 里验沙箱容器创建 + 代码执行（默认 0 关闭，
+                       不碰生产 dind / 预热池 / mcp-sandbox 网络，代价 ~90s）
 
 通知由末尾的 EXIT trap 统一发出（deploy/cd/notify.sh），通道配置在
 /etc/erp-agent/notify.env。**通知失败不影响退出码** —— 发布结果不由它决定。
@@ -152,14 +154,70 @@ cd_soak() {
         cd_compose logs --since "${seconds}s" 2>/dev/null | grep -E 'CRITICAL|Traceback' | tail -20 >&2 || true
         return 1
     fi
+
+    # ---------------------------------------------------------------- 查 Prometheus 错误率
+    # 日志扫的是 backend 容器自己的 stdout；Prometheus 查的是 /metrics 端点
+    # 暴露的 http_requests_total。两者覆盖面不同：日志能抓到 Traceback（Python
+    # 层异常），Prometheus 能抓到 5xx（HTTP 层返回码），有些 5xx 不打 Traceback
+    #（比如 nginx 502 → backend 根本没接到请求）。
+    #
+    # 查询条件：rate(http_requests_total{status=~"5.."}[1m]) / rate(http_requests_total[1m])
+    # 取观察窗最近 1 分钟的 5xx 比率。阈值 5%：生产正常时这条线是 0，5% 已经
+    # 是「明显有用户碰到错误」了。
+    #
+    # Prometheus 不可达时**只告警不 fail**：它是可观测层，挂了不该让一次本该
+    # 成功的发布变成失败（status.sh 的检查项会独立告警它的宕机）。
+    local prom_query prom_resp prom_rate
+    prom_query='sum(rate(http_requests_total{status=~"5.."}[1m])) / sum(rate(http_requests_total[1m])) * 100'
+    # URL 编码 PromQL：优先 python3，不可用时用 curl 的 --data-urlencode 代替。
+    # 生产机上 python3 不一定在 PATH（backend 容器外），notify.sh 里也记过这个坑。
+    # 这里用一个更简单的办法：curl -G --data-urlencode 会自动编码 query 参数。
+    prom_resp="$(curl -sS --max-time 10 -G \
+        "http://127.0.0.1:9090/api/v1/query" \
+        --data-urlencode "query=$prom_query" \
+        2>/dev/null || true)"
+    if [ -n "$prom_resp" ]; then
+        # 解析 instant vector 的 value[1]。jq 不一定装着，用 sed 兜底。
+        prom_rate="$(printf '%s' "$prom_resp" \
+            | sed -n 's/.*"value":\[\([0-9.]*\),"\([0-9.]*\)"\].*/\2/p' | head -1 || true)"
+        if [ -n "$prom_rate" ]; then
+            # bc 不一定装着；用 awk 比大小。
+            if awk "BEGIN{exit !($prom_rate > 5)}" 2>/dev/null; then
+                warn "观察窗内 Prometheus 报 5xx 错误率 ${prom_rate}%（阈值 5%）"
+                return 1
+            fi
+            info "观察窗 Prometheus 5xx 错误率 ${prom_rate}%（阈值 5%）"
+        fi
+    else
+        warn "Prometheus 不可达，跳过 5xx 错误率检查（status.sh 会独立告警）"
+    fi
+
     info "观察窗通过"
     return 0
 }
 
 # ---------------------------------------------------------------- 起 + 验
+# registry 模式：up 之前先 docker pull，确保本机有最新镜像。
+# 本地模式（REGISTRY_URL 为空）跳过 —— 镜像就在本机 daemon 里。
+# pull 失败不 die：本地可能已有同一 tag 的旧镜像（上一次发布留下的），
+# 用它能 up 起来但 digest 对不上 state —— cd_assert_images_local 会拦。
+cd_pull_images() {
+    [ "${CD_HAS_REGISTRY:-0}" = "1" ] || return 0
+    local ref
+    while IFS= read -r ref; do
+        info "docker pull $ref"
+        if ! docker pull "$ref" >/dev/null 2>&1; then
+            warn "pull $ref 失败 —— 本地可能还有旧 tag，cd_assert_images_local 会判"
+        fi
+    done < <(cd_all_images)
+}
+
 cd_apply_and_verify() {
     local force_nginx="${1:-0}"
     local up_rc=0
+
+    # registry 模式下先拉镜像：构建机可能不是运行机，本机不一定有最新 tag。
+    cd_pull_images
 
     log "重建容器（--no-build：跑的就是本机那组镜像，不在目标机上编译）"
 
@@ -230,6 +288,8 @@ cd_action_deploy() {
     cd_lock
 
     cd_image_refs "$TAG"
+    # registry 模式下先拉镜像再断言：构建机 != 运行机时本机不一定有这个 tag。
+    cd_pull_images
     cd_assert_images_local \
         || die "本机没有 $(cd_all_images | tr '\n' ' ') 里的某些镜像。CI 应先在本机构建出这个 tag。" "$CD_EXIT_PRECHECK"
     cd_assert_repo_has "$SHA" || cd_fetch_repo || true

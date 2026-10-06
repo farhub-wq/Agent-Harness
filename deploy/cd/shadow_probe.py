@@ -15,10 +15,14 @@
   6. 一次真实的 LLM 调用                Key / 模型名 / LLM_BASE_URL 三者都真的可用
 
 它**验不到**什么（必须说清楚，免得被当成全量验收）：
-  - 沙箱执行链路（刻意不碰，见上）
+  - 沙箱执行链路（CD_SHADOW_SANDBOX=1 时由 cd_shadow_sandbox() 在独立 dind 里验，
+    不在这个 probe 里 —— probe 在影子 backend 容器内，碰不到 docker daemon）
   - SSE 长连接的稳定性
   - 真实流量下的行为
-沙箱链路由换版后的冒烟 + 仓库里的集成测试覆盖。
+
+CD_SHADOW_SANDBOX=1 时，cd_shadow_sandbox() 会在影子容器之外起一个独立 dind，
+在里面验沙箱容器创建 + 代码执行。它不碰生产的 dind、预热池和 mcp-sandbox 网络。
+默认关：沙箱链路较稳，多起一个 dind 让影子从 ~30s 变成 ~120s，不值得每次都付。
 
 只依赖标准库：影子容器里不一定装 curl，而 requests 有没有是 requirements.txt 说了算，
 不该把探针的可用性建立在它上面。

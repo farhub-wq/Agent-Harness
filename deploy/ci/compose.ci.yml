@@ -44,3 +44,28 @@ services:
     # 覆盖掉基础文件的 `docker pull $SANDBOX_IMAGE`（alpine 里没有 docker CLI）。
     # 立刻成功退出，backend 的 service_completed_successfully 才能满足。
     command: ["true"]
+
+  # auth-path job 不验证可观测链路（它验的是认证 + 代理），但 prometheus / grafana
+  # 继承自 docker-compose.yml 会真的起两个重量级容器，拖慢 CI 且不增加覆盖面。
+  # 用 alpine 替身：healthcheck 立刻通过，不拉镜像、不占端口。
+  # stack-smoke job **不**用这个覆盖文件，跑的是完整拓扑，所以这两个替身只影响
+  # auth-path 这一条路径。
+  prometheus:
+    image: alpine:3.20
+    command: ["sleep", "infinity"]
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 1s
+      timeout: 1s
+      retries: 3
+      start_period: 0s
+
+  grafana:
+    image: alpine:3.20
+    command: ["sleep", "infinity"]
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 1s
+      timeout: 1s
+      retries: 3
+      start_period: 0s

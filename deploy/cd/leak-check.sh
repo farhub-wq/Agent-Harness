@@ -28,6 +28,8 @@ SECRET_PATHS='.env
 deploy/.env
 deploy/nginx.env
 deploy/nginx/htpasswd
+deploy/nginx/tls/cert.pem
+deploy/nginx/tls/key.pem
 deploy/dr/backup.env
 deploy/cd/state/production.env
 deploy/cd/state/production.prev.env
@@ -40,6 +42,7 @@ FILTER_MUST_EXCLUDE='/.env
 /deploy/.env
 /deploy/nginx.env
 /deploy/nginx/htpasswd
+/deploy/nginx/tls/
 /deploy/dr/backup.env
 /deploy/cd/state/'
 

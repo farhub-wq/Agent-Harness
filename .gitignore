@@ -45,6 +45,11 @@ deploy/cd/state/
 # ============ 认证凭据 ============
 # nginx Basic Auth 的密码哈希
 deploy/nginx/htpasswd
+# TLS 证书（bootstrap.sh 生成：certbot 真证书或 openssl 自签）
+deploy/nginx/tls/
+# Prometheus / Grafana 持久化数据（运行时生成，不属于源码树）
+deploy/prometheus/data/
+deploy/grafana/data/
 # CI 集成 job 的一次性口令（deploy/ci/prepare-stack.sh 生成，含 Basic Auth 明文）。
 # 只在 runner 上存在几十分钟，但它形态上和真凭据没有区别，不给自己留例外。
 deploy/ci/.ci-credentials.sh

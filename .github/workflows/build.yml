@@ -98,7 +98,7 @@ jobs:
               echo
               echo '```'
               docker image ls --format '{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}' \
-                | grep -E '^(erp-agent-app|erp-agent-frontend|erp-mock):' || true
+                | grep -E 'erp-agent-app|erp-agent-frontend|erp-mock' | grep -v '<none>' || true
               echo '```'
               echo "下一步：dispatch \`deploy.yml\`，version=$VERSION（需要 production 环境审批）。"
             fi
