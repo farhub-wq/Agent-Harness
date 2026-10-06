@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.0.2](https://github.com/farhub-wq/Agent-Harness/compare/v1.0.1...v1.0.2) (2026-10-06)
+
+
+### 修复
+
+* **cd,ci:** 修两处让整条发布链路从未跑通的缺陷 ([396526e](https://github.com/farhub-wq/Agent-Harness/commit/396526ea0abc8c783129221d91e88f89d56cd9d3))
+* **cd:** Prometheus 只在 internal data 网，宿主探测必然 000 致误报/判据失效 ([882a706](https://github.com/farhub-wq/Agent-Harness/commit/882a706ac355d50b8d7913451913e909bb4e23d0))
+* **cd:** 影子启动失败（rc=4）残留 pending，被巡检误报为「发布卡在半途」 ([9eb425b](https://github.com/farhub-wq/Agent-Harness/commit/9eb425b7c5cfb84807d0dc1a428d6244534b24e0))
+* **cd:** 未配 registry 时 cd_registry_prefix 返回 1，deploy 死在镜像引用阶段 ([f88d8bf](https://github.com/farhub-wq/Agent-Harness/commit/f88d8bf9c11261dde8448410bbf2729834784763))
+* **cd:** 老实例升级到含 :443 的 nginx 时缺占位证书，nginx 启动即崩必回滚 ([62c0b4c](https://github.com/farhub-wq/Agent-Harness/commit/62c0b4cafd844c06b9b185469ad53135ed4bf2b5))
+* **ci:** 集成栈 prepare-stack 补 nginx TLS 占位证书，解两个集成 gate 长期红 ([629d818](https://github.com/farhub-wq/Agent-Harness/commit/629d818ce4f4fe8d593851fd3bd5fbdbe799aecc))
+* **deploy,backend:** 修三处让真机首次发布与 CI 集成栈失败的问题 ([9ff6b1a](https://github.com/farhub-wq/Agent-Harness/commit/9ff6b1ab7e382d563ae9ac7d206b8521815b442a))
+* **nginx:** TLS 开关在 http 顶层用 set 非法，nginx -t emerg 必崩 ([d3128e0](https://github.com/farhub-wq/Agent-Harness/commit/d3128e0b2b39167a48dc634c7768c4bf5356dede))
+* **nginx:** 修复 Basic Auth 带凭据请求 500（htpasswd 权限 + TLS 开关 envsubst cycle） ([2097cff](https://github.com/farhub-wq/Agent-Harness/commit/2097cff9117db2217cb16e80ba4f0a127b19144c))
+
 ## [1.0.1](https://github.com/farhub-wq/Agent-Harness/compare/v1.0.0...v1.0.1) (2026-10-05)
 
 
