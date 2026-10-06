@@ -218,6 +218,9 @@ cd_apply_and_verify() {
     # 老安装升级到含 :443 的 nginx.conf 时，宿主 tls 目录是空的（bootstrap 只在
     # 装机器时生成过证书），不补占位证书 nginx 会在下面这一步启动即崩。幂等。
     cd_ensure_nginx_tls_cert
+    # 老实例的 htpasswd 权限（600→644）与 nginx.env 缺 TLS_ENABLED 行同样只在
+    # up 前补最省事；本函数被正常发布与回滚两路复用，一次调用两边都覆盖。
+    cd_ensure_nginx_auth_and_switch
 
     log "重建容器（--no-build：跑的就是本机那组镜像，不在目标机上编译）"
 

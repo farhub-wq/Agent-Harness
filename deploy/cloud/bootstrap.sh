@@ -218,13 +218,15 @@ else
     _self_signed_cert
 fi
 
-# 把 TLS_ENABLED 写进 nginx.env（envsubst 渲染 tls.conf.template 读它）
-if [ -n "$TLS_ENABLED" ]; then
-    if grep -q '^TLS_ENABLED=' deploy/nginx.env 2>/dev/null; then
-        sed -i "s|^TLS_ENABLED=.*|TLS_ENABLED=$TLS_ENABLED|" deploy/nginx.env
-    else
-        printf 'TLS_ENABLED=%s\n' "$TLS_ENABLED" >> deploy/nginx.env
-    fi
+# 把 TLS_ENABLED 写进 nginx.env（envsubst 渲染 tls.conf.template 读它）。
+# **无论开关与否都要显式留下这一行（包括纯 HTTP 的空值）**：nginx 镜像的
+# envsubst 只替换容器环境里「已定义」的变量，这行缺失时 ${TLS_ENABLED} 会原样
+# 残留进 tls.conf，被 nginx 当成变量引用、恰好与 map 目标 $tls_enabled 自引用，
+# 于是每个请求都 "cycle while evaluating variable tls_enabled" → 500。
+if grep -q '^TLS_ENABLED=' deploy/nginx.env 2>/dev/null; then
+    sed -i "s|^TLS_ENABLED=.*|TLS_ENABLED=$TLS_ENABLED|" deploy/nginx.env
+else
+    printf 'TLS_ENABLED=%s\n' "$TLS_ENABLED" >> deploy/nginx.env
 fi
 # 公开地址改成 https（如果 TLS 开了）
 if [ -n "$TLS_ENABLED" ] && [ -f deploy/.env ]; then
@@ -270,6 +272,12 @@ else
     GENERATED_PW=1
     echo "  已生成"
 fi
+# 必须 644、不能是 600：nginx master 是 root，但请求期打开 htpasswd 校验口令的是
+# worker（nginx / uid 101）。600 root:root 它读不了 → 每个**带凭据**请求都 500，
+# 而 /healthz 因 auth_basic off 照常 200，表现成"站点活着但一登录就 500"。
+# 文件里是 apr1 哈希不是明文；deploy/ci/prepare-stack.sh 同样按 644 处理（见其注释）。
+# 对「已存在」的老文件也无条件 chmod，顺手修正历史那批改漏落成 600 的实例。
+chmod 644 deploy/nginx/htpasswd
 
 # ---------------------------------------------------------------- 起服务
 log "构建镜像（frontend 的 next build 最慢，2核机器上十几分钟正常）"

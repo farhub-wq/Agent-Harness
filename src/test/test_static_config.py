@@ -16,6 +16,9 @@
 4. 前端源码里不得有硬编码的后端绝对地址（镜像必须与环境无关）。
 5. `tls.conf.template` 被 nginx.conf 在 http{} 顶层 include：开关必须用 map
    定义、不能用 set（set 在该上下文 nginx -t 直接 emerg，真机发布回滚过）。
+6. nginx worker 固定为非特权用户 `nginx`，且 htpasswd 必须 644、nginx.env 必须
+   显式带 `TLS_ENABLED=` 空行 —— 由 bootstrap（新装机）与 deploy/cd（老实例升级）
+   两处共同兜住。这两处没兜住时整站「一登录就 500、/healthz 却 200」。
 
 第 2 条的运行时对照在 `deploy/ci/smoke-edge.sh`（集成 job）。这里只做**结构**
 断言 —— 它能抓住"删了一行 header"，抓不住"proxy_pass 指到了错的端口"，后者
@@ -32,6 +35,8 @@ ENV_EXAMPLE = REPO / "deploy" / ".env.example"
 NGINX_ENV_EXAMPLE = REPO / "deploy" / "nginx.env.example"
 COMPOSE = REPO / "docker-compose.yml"
 LIB_SH = REPO / "deploy" / "cd" / "lib.sh"
+DEPLOY_SH = REPO / "deploy" / "cd" / "deploy.sh"
+BOOTSTRAP_SH = REPO / "deploy" / "cloud" / "bootstrap.sh"
 NGINX_CONF = REPO / "deploy" / "nginx" / "nginx.conf"
 NGINX_TEMPLATE = REPO / "deploy" / "nginx" / "templates" / "internal_token.conf.template"
 TLS_TEMPLATE = REPO / "deploy" / "nginx" / "templates" / "tls.conf.template"
@@ -292,6 +297,85 @@ class TestNginxTlsSwitchTemplate(unittest.TestCase):
         self.assertIn(
             "${TLS_ENABLED}", active,
             "模板必须引用容器环境变量 ${TLS_ENABLED}（由 20-envsubst 渲染）",
+        )
+
+
+class TestNginxAuthRuntimeFiles(unittest.TestCase):
+    """钉死两个只在**带凭据请求**上爆、探针看不见的运行时坑（真机 2026-10 踩中）。
+
+    现象是「整站一登录就 500、/healthz 却照常 200」，定位到两个互相独立的问题：
+
+    1. htpasswd 落成 ``600 root:root``，而打开它校验口令的是 worker(nginx
+       uid 101) —— ``open() .../htpasswd (13: Permission denied)`` → 500。
+    2. ``nginx.env`` 缺 ``TLS_ENABLED=`` 行，容器内该变量未定义，envsubst 不替换
+       ``${TLS_ENABLED}``，它残留进 tls.conf 与 map 目标 ``$tls_enabled`` 自引用
+       —— ``cycle while evaluating variable "tls_enabled"`` → 500。
+
+    bootstrap 管全新装机、deploy/cd 管老实例原地升级，两条路径都必须兜住。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.conf = _read(NGINX_CONF)
+        cls.bootstrap = _read(BOOTSTRAP_SH)
+        cls.lib = _read(LIB_SH)
+        cls.deploy = _read(DEPLOY_SH)
+        cls.nginx_env_example = _read(NGINX_ENV_EXAMPLE)
+
+    def test_nginx_conf_pins_worker_user_nginx(self):
+        m = re.search(r"(?m)^user\s+nginx\s*;", self.conf)
+        self.assertIsNotNone(m, "nginx.conf 必须显式 user nginx;（固化 worker 非特权用户）")
+        http_m = re.search(r"(?m)^http\s*\{", self.conf)
+        self.assertIsNotNone(http_m)
+        self.assertLess(
+            m.start(), http_m.start(),
+            "user nginx; 必须在 http{} 之前（main 上下文），否则 nginx -t 报错",
+        )
+
+    def test_bootstrap_chmods_htpasswd_644(self):
+        self.assertIn(
+            "chmod 644 deploy/nginx/htpasswd", self.bootstrap,
+            "bootstrap 生成/保留 htpasswd 后必须 chmod 644 —— worker(uid 101) 打不开 "
+            "600 root:root，带凭据请求全 500（deploy/ci/prepare-stack.sh 有同款教训注释）",
+        )
+
+    def test_bootstrap_writes_tls_switch_unconditionally(self):
+        idx = self.bootstrap.find("把 TLS_ENABLED 写进 nginx.env")
+        self.assertGreaterEqual(idx, 0, "bootstrap 里找不到写 TLS_ENABLED 进 nginx.env 的段落")
+        # 只截到本段的 fi 为止 —— 紧随其后还有一条 `if [ -n "$TLS_ENABLED" ]`
+        # （TLS 开时改 PUBLIC_BASE_URL），那条是合理的，不能混进来一起判。
+        fi_at = self.bootstrap.index("\nfi\n", idx)
+        block = self.bootstrap[idx: fi_at + 4]
+        self.assertIn(r"printf 'TLS_ENABLED=%s\n'", block)
+        self.assertNotIn(
+            'if [ -n "$TLS_ENABLED" ]', block,
+            "把 TLS_ENABLED 写进 nginx.env 不能以「值非空」为前提：纯 HTTP 也要显式留下"
+            "空行，否则容器内该变量未定义、envsubst 残留 ${TLS_ENABLED} 与 map 目标自引用 cycle 500",
+        )
+
+    def test_nginx_env_example_declares_empty_tls_switch(self):
+        self.assertRegex(
+            self.nginx_env_example, r"(?m)^TLS_ENABLED=\s*$",
+            "nginx.env.example 必须含一条空的 TLS_ENABLED= —— 新装机从它 cp，缺这行就埋下 cycle",
+        )
+
+    def test_cd_ensures_auth_and_switch_and_is_called_before_up(self):
+        self.assertRegex(self.lib, r"(?m)^cd_ensure_nginx_auth_and_switch\s*\(\)\s*\{")
+        start = self.lib.index("cd_ensure_nginx_auth_and_switch()")
+        body = self.lib[start: self.lib.index("\n}\n", start) + 2]
+        self.assertRegex(
+            body, r"chmod\s+644[^\n]*htpasswd",
+            "cd_ensure_nginx_auth_and_switch 必须把老实例的 htpasswd 修正到 644",
+        )
+        self.assertIn(
+            "TLS_ENABLED=", body,
+            "cd_ensure_nginx_auth_and_switch 必须在 nginx.env 缺行时补 TLS_ENABLED= 空值",
+        )
+        apply_start = self.deploy.index("cd_apply_and_verify()")
+        apply_body = self.deploy[apply_start: self.deploy.index("\n}\n", apply_start) + 2]
+        self.assertIn(
+            "cd_ensure_nginx_auth_and_switch", apply_body,
+            "兜底函数必须在 cd_apply_and_verify 的 up -d 前调用（该函数被正常发布与回滚两路复用）",
         )
 
 

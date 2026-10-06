@@ -433,6 +433,43 @@ cd_ensure_nginx_tls_cert() {
     return 0
 }
 
+# up 前对两个 bind-mount 运行时文件做幂等修正。与 cd_ensure_nginx_tls_cert 同属
+# 「bootstrap 只在装机器时跑过、老实例升级补不匀」的兜底，在 cd_apply_and_verify
+# 的 up -d 前调用，正常发布与回滚两路都经过这里。两个坑都只在**带凭据请求**上爆，
+# 无凭据的 /healthz 照常 200，所以平时健康检查根本看不出来。
+cd_ensure_nginx_auth_and_switch() {
+    local nginx_dir="$CD_REPO_ROOT/deploy/nginx"
+    local nginx_env="$CD_REPO_ROOT/deploy/nginx.env"
+
+    # 1) htpasswd 必须对 worker(nginx uid 101) 可读。老实例（bootstrap 早期漏 chmod
+    #    那批）落的是 600 root:root，worker 在请求期打不开 → 带凭据请求全 500。
+    #    644 即可（apr1 哈希非明文），与 deploy/ci/prepare-stack.sh 保持一致。
+    if [ -f "$nginx_dir/htpasswd" ]; then
+        local mode
+        mode="$(stat -c '%a' "$nginx_dir/htpasswd" 2>/dev/null || true)"
+        if [ "$mode" != "644" ]; then
+            if chmod 644 "$nginx_dir/htpasswd"; then
+                info "nginx htpasswd 权限由 ${mode:-未知} 修正为 644（worker 否则读不了，带凭据请求 500）"
+            else
+                warn "chmod 644 $nginx_dir/htpasswd 失败"
+            fi
+        fi
+    fi
+
+    # 2) nginx.env 必须显式含 TLS_ENABLED= 行（值可空）。缺这行时容器内该变量未
+    #    定义，envsubst 不替换 ${TLS_ENABLED}，它残留进 tls.conf 与 map 目标
+    #    $tls_enabled 自引用 → 每个请求 cycle 500。只在「完全没这行」时补空值
+    #    （= 纯 HTTP）；已有值（含 TLS_ENABLED=1）绝不动。
+    if [ -f "$nginx_env" ] && ! grep -q '^TLS_ENABLED=' "$nginx_env" 2>/dev/null; then
+        if printf 'TLS_ENABLED=\n' >> "$nginx_env"; then
+            info "nginx.env 缺 TLS_ENABLED 行，已补空值（纯 HTTP；防 envsubst 残留自引用 cycle）"
+        else
+            warn "向 $nginx_env 补 TLS_ENABLED 失败"
+        fi
+    fi
+    return 0
+}
+
 cd_sync_tree() {
     local sha="$1" staging rc=0
     [ -n "$sha" ] || return 1

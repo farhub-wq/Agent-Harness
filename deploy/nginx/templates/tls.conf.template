@@ -11,8 +11,15 @@
 # emerg（"set" directive is not allowed here）。改用同样只能在 http 层用的
 # map：源取一个每请求必有值的 $server_port，default 恒定输出渲染进来的开关，
 # 效果与「常量」等价 —— $tls_enabled 非空当且仅当 TLS_ENABLED 非空。
-# （envsubst 只替换容器环境里已定义的 ${TLS_ENABLED}；$server_port/$tls_enabled
+# （envsubst 只替换容器环境里**已定义**的 ${TLS_ENABLED}；$server_port/$tls_enabled
 # 不是环境变量，会原样保留。）
+#
+# ⚠ 因此 deploy/nginx.env 里必须**显式存在** `TLS_ENABLED=` 这一行（值可空）：
+# 一旦该变量在容器环境里未定义，envsubst 不替换 ${TLS_ENABLED}，它会原样落进下面
+# 的 default，被 nginx 当变量引用、与 map 目标 $tls_enabled 构成自引用 —— 每个请求
+# 都报 "cycle while evaluating variable tls_enabled" 并 500（无凭据的 /healthz 因
+# 在 rewrite 阶段也求值它而一起挂）。这行由 bootstrap.sh 无条件写入；TLS 特性加入前
+# 装出来的老实例没有它，由 deploy/cd 的 cd_ensure_nginx_auth_and_switch 在 up 前补齐。
 #
 # 证书路径**不**走变量：nginx 的 ssl_certificate 在配置加载时解析路径，
 # 不支持运行时变量。证书始终在固定路径 /etc/nginx/tls/{cert,key}.pem，
