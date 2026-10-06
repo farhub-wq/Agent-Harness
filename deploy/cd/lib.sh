@@ -356,7 +356,57 @@ cd_hash_files() {
 cd_bind_hash()  { cd_hash_files "${CD_BIND_PATHS[@]}"; }
 
 # deploy/nginx/** 的内容，决定换版时要不要 --force-recreate nginx。
-cd_nginx_hash() { cd_hash_files deploy/nginx; }
+# tls/ 刻意排除：那里只有运行时生成的证书（bootstrap 的 certbot/自签，或
+# cd_ensure_nginx_tls_cert 补的占位），在 .gitignore 里、不入库，不是「配置
+# 变了没」的信号。把它算进来会让「补一次占位证书」就抖一次 hash、白重建 nginx。
+cd_nginx_hash() {
+    local inner
+    inner="$( cd "$CD_REPO_ROOT" && find deploy/nginx -type f \
+                ! -path 'deploy/nginx/tls/*' -print0 2>/dev/null \
+              | sort -z | xargs -0 -r sha256sum )"
+    if [ -z "$inner" ]; then
+        warn "deploy/nginx 下一个文件都没有（除 tls/）—— 算不出快照哈希"
+        return 1
+    fi
+    printf '%s' "$inner" | sha256sum | cut -d' ' -f1
+}
+
+# 升级路径上的 nginx 启动前提：443 server 块无条件存在于 nginx.conf，其
+# ssl_certificate 是加载期解析的字面路径，文件缺失则 nginx -t 失败、容器
+# restart 死循环、换版健康超时回滚。bootstrap.sh 只在装机器那一次生成证书，
+# deploy 不重跑它 —— 于是 af0c0fe（引入 :443）之前装出来的老实例首次升级，
+# 宿主 deploy/nginx/tls/ 是空的，必挂。这里在每次 up 前补齐：两文件都在且
+# 非空就不动（certbot 真证书绝不能被覆盖），否则用宿主 openssl 自签一份占位
+#（纯 HTTP 下没人用它握手，只为让 nginx -t 过）。宿主 openssl 与 bootstrap
+# 同一前提，docker 机上必有。
+cd_ensure_nginx_tls_cert() {
+    local tls_dir="$CD_REPO_ROOT/deploy/nginx/tls"
+    local cert="$tls_dir/cert.pem" key="$tls_dir/key.pem"
+    if [ -s "$cert" ] && [ -s "$key" ]; then
+        return 0
+    fi
+    mkdir -p "$tls_dir" || { warn "建不出 $tls_dir"; return 0; }
+    if ! command -v openssl >/dev/null 2>&1; then
+        warn "宿主没有 openssl，无法补 nginx TLS 占位证书；$tls_dir 缺证书时 nginx 会起不来"
+        return 0
+    fi
+    info "nginx TLS 证书缺失，自签一份占位到 $tls_dir（真证书请走 bootstrap.sh 的 certbot）"
+    local tmp_cert tmp_key
+    tmp_cert="$(mktemp "$tls_dir/.cert.XXXXXX" 2>/dev/null)" || return 0
+    tmp_key="$(mktemp "$tls_dir/.key.XXXXXX" 2>/dev/null)" || { rm -f "$tmp_cert"; return 0; }
+    if openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+            -keyout "$tmp_key" -out "$tmp_cert" \
+            -subj "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost" >/dev/null 2>&1; then
+        chmod 600 "$tmp_key"
+        mv "$tmp_key" "$key"
+        mv "$tmp_cert" "$cert"
+    else
+        rm -f "$tmp_cert" "$tmp_key"
+        warn "自签 nginx 占位证书失败（openssl 报错）"
+    fi
+    return 0
+}
 
 cd_sync_tree() {
     local sha="$1" staging rc=0

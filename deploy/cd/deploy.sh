@@ -219,6 +219,10 @@ cd_apply_and_verify() {
     # registry 模式下先拉镜像：构建机可能不是运行机，本机不一定有最新 tag。
     cd_pull_images
 
+    # 老安装升级到含 :443 的 nginx.conf 时，宿主 tls 目录是空的（bootstrap 只在
+    # 装机器时生成过证书），不补占位证书 nginx 会在下面这一步启动即崩。幂等。
+    cd_ensure_nginx_tls_cert
+
     log "重建容器（--no-build：跑的就是本机那组镜像，不在目标机上编译）"
 
     # `up -d` 必须前台跑完再判健康。它的阻塞来自 depends_on 的健康条件，而这个
