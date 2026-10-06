@@ -352,6 +352,12 @@ cd_action_deploy() {
     # 影子启动：失败即止，**生产一秒都没停**（这是它存在的全部理由，见 lib.sh）。
     if ! cd_shadow; then
         warn "影子启动未通过 —— 中止发布，生产未受任何影响"
+        # pending 在影子之前就写了（上面 cd_write_state），而这一版既没换容器、
+        # 也没 mv 成正式 state。不清掉它会留下「有一次发布卡在半途」的假信号：
+        # 20 分钟后巡检误报、这期间定时备份还会被 cd_deploy_in_flight 整轮跳过。
+        # 这里进程是主动走到 exit 的（不是被 kill -9），生产在跑旧版且健康，
+        # 所以删除是精确的；真被强杀留下的 pending 仍会保留给巡检。
+        rm -f "$CD_PENDING_FILE"
         exit "$CD_EXIT_SHADOW"
     fi
 
