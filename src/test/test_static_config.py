@@ -4,7 +4,7 @@
 正则）。它们存在的理由是：`deploy/cd/README.md` 里那句"改静态 IP 要同步改两处"
 以前只是文档，而文档不会拦住任何人 —— 现在由测试拦住。
 
-具体钉住的四件事：
+具体钉住的五件事：
 
 1. `SANDBOX_MCP_HOST_IP` 在三个文件里必须完全一致，且落在 `mcp-sandbox` 的
    子网内。改坏任意一处 → mcp 换了地址而沙箱容器的 /etc/hosts 还写着旧的 →
@@ -14,6 +14,8 @@
    某个 location 静默不认证。
 3. 两个 env 模板都得有 `INTERNAL_AUTH_TOKEN` 这个键。
 4. 前端源码里不得有硬编码的后端绝对地址（镜像必须与环境无关）。
+5. `tls.conf.template` 被 nginx.conf 在 http{} 顶层 include：开关必须用 map
+   定义、不能用 set（set 在该上下文 nginx -t 直接 emerg，真机发布回滚过）。
 
 第 2 条的运行时对照在 `deploy/ci/smoke-edge.sh`（集成 job）。这里只做**结构**
 断言 —— 它能抓住"删了一行 header"，抓不住"proxy_pass 指到了错的端口"，后者
@@ -32,6 +34,7 @@ COMPOSE = REPO / "docker-compose.yml"
 LIB_SH = REPO / "deploy" / "cd" / "lib.sh"
 NGINX_CONF = REPO / "deploy" / "nginx" / "nginx.conf"
 NGINX_TEMPLATE = REPO / "deploy" / "nginx" / "templates" / "internal_token.conf.template"
+TLS_TEMPLATE = REPO / "deploy" / "nginx" / "templates" / "tls.conf.template"
 FRONTEND_SRC = REPO / "frontend" / "src"
 
 
@@ -241,6 +244,55 @@ class TestNginxAuthStructure(unittest.TestCase):
         template = _read(NGINX_TEMPLATE)
         self.assertIn("${INTERNAL_AUTH_TOKEN}", template)
         self.assertIn("set $internal_token", template)
+
+
+class TestNginxTlsSwitchTemplate(unittest.TestCase):
+    """tls.conf 在 nginx.conf 的 http{} **顶层**被 include，那里只能用 map。
+
+    真机发布时踩过：模板原本写 ``set $tls_enabled "...";``，而 set 属于
+    rewrite 模块、只允许出现在 server/location/if，写在 http 层 nginx -t 直接
+    ``"set" directive is not allowed here``，容器 restart 死循环、换版必回滚。
+    CI 全新起栈没拦住（也没真跑 nginx -t），所以这里用静态断言钉死上下文。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.template = _read(TLS_TEMPLATE)
+        cls.conf = _read(NGINX_CONF)
+
+    def _active_lines(self):
+        # 注释行里会反复讨论 set/map，绝不能拿注释内容做断言 —— 只看有效行。
+        return [
+            ln for ln in self.template.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")
+        ]
+
+    def test_tls_conf_is_included_in_http_context(self):
+        self.assertIn("include /etc/nginx/conf.d/tls.conf;", self.conf)
+        include_at = self.conf.index("include /etc/nginx/conf.d/tls.conf;")
+        m = re.search(r"^[ \t]*server\s*\{", self.conf, re.MULTILINE)
+        self.assertIsNotNone(m, "nginx.conf 里没有 server 块？")
+        self.assertLess(
+            include_at, m.start(),
+            "tls.conf 的 include 出现在第一个 server 块之后 —— 那就不在 http 顶层，"
+            "本测试对 set/map 的上下文假设失效了，需要重审",
+        )
+
+    def test_switch_is_defined_with_map_not_set(self):
+        active = "\n".join(self._active_lines())
+        self.assertRegex(
+            active, r"map\s+\$\w+\s+\$tls_enabled\s*\{",
+            "TLS 开关必须在 http 层用 map 定义 $tls_enabled（set 在该上下文非法）",
+        )
+        self.assertNotRegex(
+            active, r"(?m)^\s*set\s+",
+            "tls.conf 在 http{} 顶层被 include，不能出现 set 指令 —— "
+            "nginx -t 会 emerg '\"set\" directive is not allowed here'（真机复现）",
+        )
+        self.assertIn(
+            "${TLS_ENABLED}", active,
+            "模板必须引用容器环境变量 ${TLS_ENABLED}（由 20-envsubst 渲染）",
+        )
 
 
 class TestEnvTemplates(unittest.TestCase):
