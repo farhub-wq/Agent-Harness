@@ -253,12 +253,17 @@ cd_registry_prefix() {
     # 去掉末尾斜杠再加一个：registry URL 形如 registry.cn-hangzhou.aliyuncs.com，
     # 也可能带 namespace（registry.../my-ns）。统一处理成 "prefix/" 形式。
     url="${url%/}"
-    [ -n "$url" ] && printf '%s/' "$url"
+    # 必须用 if/else，不能写 `[ -n "$url" ] && printf`：后者在 url 为空时返回 1，
+    # 会让 `prefix=$(cd_registry_prefix)` 在 set -e 下让整个脚本退出 —— 这是真机
+    # 测试发现的 bug（没配 registry 的机器 deploy 100% 死在前置检查后、断言镜像前）。
+    if [ -n "$url" ]; then
+        printf '%s/' "$url"
+    fi
 }
 
 cd_image_refs() {
     local tag="$1" prefix
-    prefix="$(cd_registry_prefix)"
+    prefix="$(cd_registry_prefix)" || true
     export APP_IMAGE="${prefix}${CD_APP_IMAGE_NAME}:$tag"
     export FRONTEND_IMAGE="${prefix}${CD_FRONTEND_IMAGE_NAME}:$tag"
     export MOCK_ERP_IMAGE="${prefix}${CD_MOCK_IMAGE_NAME}:$tag"
