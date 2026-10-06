@@ -21,6 +21,17 @@
 
 ---
 
+## 2026-10-06 更新
+
+真机定位并修复「整站一登录就 500、/healthz 却 200」，转绿 CI 两个长期失败的集成门禁，走通 v1.0.2 发布全链路。
+
+- **500 根因一：htpasswd 权限 600，worker 读不了**。nginx master(root) 只在加载期读证书；请求期打开 `auth_basic_user_file` 校验口令的是 **worker（nginx uid 101）**。生产 htpasswd 落成 600 root:root 后，每个**带凭据**请求都是 `[crit] open() .../htpasswd (13: Permission denied)` → 500；无凭据请求不打开该文件所以 401 正常、/healthz（auth_basic off）照常 200 —— 探活带不了凭据，健康检查永远发现不了。修复三处：[bootstrap.sh](deploy/cloud/bootstrap.sh) 生成后无条件 `chmod 644`（CI 的 prepare-stack.sh 早已按 644 处理并留过同款教训注释，生产路径漏对齐）；[deploy/cd/lib.sh](deploy/cd/lib.sh) 新增 `cd_ensure_nginx_auth_and_switch`，up 前对老实例幂等修正（正常发布与回滚两路复用）；[nginx.conf](deploy/nginx/nginx.conf) 显式 `user nginx;` 固化 worker 用户，不再依赖镜像编译默认。
+- **500 根因二：envsubst 残留 → map 自引用 cycle**。nginx 镜像入口的 envsubst 只替换**已定义**的变量：nginx.env 缺 `TLS_ENABLED=` 行时容器内该变量未定义，`${TLS_ENABLED}` 原样残留进 tls.conf 的 map `default`，被 nginx 当变量引用、与 map 目标 `$tls_enabled` 自引用 → 每个请求 `cycle while evaluating variable "tls_enabled"` → 500。修复：bootstrap **无论开关与否**都显式写该行（值可空）；cd 兜底对缺行的老实例补空值；[tls.conf.template](deploy/nginx/templates/tls.conf.template) 加注释说明这个坑。
+- **两个坑都极难排查**：都只在带凭据请求上爆（探活全绿）；`nginx -t` 只静态解析、不求值变量，抓不到 map cycle；隔离容器实验若不做 644 副本，权限错误会掩盖真实结论。因此 [test_static_config.py](src/test/test_static_config.py) 新增 `TestNginxAuthRuntimeFiles` 5 项结构断言在 PR 上秒级拦截（user 位置、chmod 644、恒写 TLS 空行、模板占位、cd 兜底存在且在 up 前调用）。
+- **CI 集成栈两个 job 自 TLS 合入起长期红**：「认证与代理链路」「完整拓扑」每轮 PR 都失败——nginx.conf 的 :443 server **无条件**加载 `ssl_certificate /etc/nginx/tls/cert.pem`（该指令在 master 加载配置期解析路径，与开关无关），CI 只跑 [prepare-stack.sh](deploy/ci/prepare-stack.sh)、不跑 bootstrap/deploy，没人生成证书 → nginx 启动即 emerg、容器永久 restarting → 等 healthy 420s/600s 双双超时，**认证与沙箱断言一条都没跑过**。修复：prepare-stack 用与 `cd_ensure_nginx_tls_cert` 同一条 openssl（RSA2048 / 3650 天 / CN=localhost）自签占位——占位证书从此有三条生成路径（装机 / 老实例升级 / CI），静态断言钉死第三条。修复后 ci 八个 job 全绿，沙箱预热池断言（backend→dind 真建出容器）首次真正执行并通过。
+- **v1.0.2 发布闭环**：release PR 门禁全绿合并 → tag `v1.0.2` → build workflow（同一份门禁 + 生产自托管 runner 构建镜像成功，产出 `v1.0.2` 与 `sha-<12>` 双 tag）→ 生产切到 v1.0.2，9 服务 healthy，认证矩阵复验通过（无凭据 401 / 错密 401 / healthz 200 / 正确凭据 200）。
+- **发布正向冒烟打通**：部署机 `/etc/erp-agent/smoke.env` 的 `SMOKE_BASIC_PASSWORD` 已填（与 htpasswd 一致）。注意 htpasswd 是 apr1 哈希不可逆——装机时「只打印一次」的密码找不回的话，唯一路径是重设 htpasswd（原地截断重写保 inode，避免单文件 bind mount 换 inode 后容器读到旧文件的坑，免重启 nginx）。此后每次发布闸门自动执行认证后冒烟，不再告警「前端与 /api 链路未验证」。
+
 ## 2026-10-05 更新
 
 本次补全 CI/CD 链路的最后几块拼图：构建失败通知、恢复演练自动化、箱外告警注册。
@@ -426,7 +437,7 @@ ERP-AGENT/
 | ERP 依赖 | 指向未开源的 Java 服务，跑不起来 | `deploy/mock-erp/` 自建替身，可独立运行 |
 | grader 证据 | 只看最近 30 条消息，长任务误判编造 | 全量工具调用台账先于截断注入 |
 | 发布与回滚 | 无（手工传文件 + 重建容器） | `deploy/cd/` 一条命令发布，失败自动回滚（镜像 + 源码树 + 状态文件三方一致） |
-| 质量门禁 | 无 | GitHub Actions 7 个 job：静态检查 + **真起一套栈**的集成冒烟（认证与代理链路、完整拓扑含沙箱） |
+| 质量门禁 | 无 | GitHub Actions 8 个 job：静态检查 + **真起一套栈**的集成冒烟（认证与代理链路、完整拓扑含沙箱） |
 
 上游的开源代码本身没有密钥泄漏，本仓库也没有；**所有密码类配置一律不入库**，仓库里只有 `*.example` 模板。
 
