@@ -141,6 +141,31 @@ cd_compose() {
     ( cd "$CD_REPO_ROOT" && docker compose -p "$PROJECT" "${files[@]}" "$@" )
 }
 
+# 从 data 网内访问 Prometheus。它在 docker-compose.yml 里只挂 internal 的 data
+# 网、没有 ports 映射，所以从宿主 curl 127.0.0.1:9090 必然连不上（http_code
+# 000）—— status.sh 的验活与 cd_soak 的 5xx 查询原先都从宿主够它，于是前者
+# 把「healthy 但宿主够不到」误报成 FAIL、后者的错误率判据永远走「不可达跳过」。
+# backend 容器在 data 网（要连 mongo）且镜像自带 python，借它一跳即可。
+#   $1 = 路径（/-/healthy 或 /api/v1/query）
+#   $2 = 裸 PromQL（可选；URL 编码在这里做，调用方不用管）
+# 响应体打到 stdout；网络/HTTP/进程任何一环失败都返回非 0、不打印报错。
+cd_prom_call() {
+    local path="$1" promql="${2:-}"
+    cd_compose exec -T backend python - "$path" "$promql" <<'PY' 2>/dev/null
+import sys, urllib.request, urllib.parse
+path = sys.argv[1]
+promql = sys.argv[2] if len(sys.argv) > 2 else ""
+url = "http://prometheus:9090" + path
+if promql:
+    url += "?" + urllib.parse.urlencode({"query": promql})
+try:
+    with urllib.request.urlopen(url, timeout=8) as resp:
+        sys.stdout.write(resp.read().decode("utf-8", "replace"))
+except Exception:
+    sys.exit(1)
+PY
+}
+
 cd_assert_tools() {
     local missing="" t
     for t in docker curl flock openssl rsync git sha256sum; do

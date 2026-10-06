@@ -169,13 +169,9 @@ cd_soak() {
     # 成功的发布变成失败（status.sh 的检查项会独立告警它的宕机）。
     local prom_query prom_resp prom_rate
     prom_query='sum(rate(http_requests_total{status=~"5.."}[1m])) / sum(rate(http_requests_total[1m])) * 100'
-    # URL 编码 PromQL：优先 python3，不可用时用 curl 的 --data-urlencode 代替。
-    # 生产机上 python3 不一定在 PATH（backend 容器外），notify.sh 里也记过这个坑。
-    # 这里用一个更简单的办法：curl -G --data-urlencode 会自动编码 query 参数。
-    prom_resp="$(curl -sS --max-time 10 -G \
-        "http://127.0.0.1:9090/api/v1/query" \
-        --data-urlencode "query=$prom_query" \
-        2>/dev/null || true)"
+    # Prometheus 不对宿主发布端口（只在 internal data 网），经 backend 容器一跳
+    # 查询，URL 编码在 cd_prom_call 里完成（见 lib.sh）。
+    prom_resp="$(cd_prom_call /api/v1/query "$prom_query" 2>/dev/null || true)"
     if [ -n "$prom_resp" ]; then
         # 解析 instant vector 的 value[1]。jq 不一定装着，用 sed 兜底。
         prom_rate="$(printf '%s' "$prom_resp" \

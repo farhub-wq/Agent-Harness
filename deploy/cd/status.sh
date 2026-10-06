@@ -206,16 +206,15 @@ if [ -z "$ps_svc" ]; then
 else
     health="$(printf '%s' "$ps_svc" | awk '{print $2}')"
     if [ "$health" = "healthy" ]; then
-        # 进一步验：/-/healthy 返回 200 才算真活着（compose healthcheck 也是探它，
-        # 这里是从宿主机侧再探一次，覆盖 healthcheck 自身配置错误的情况）。
-        prom_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
-            "http://127.0.0.1:9090/-/healthy" 2>/dev/null || true)"
-        # 注意：prometheus 不在 edge 网络上，宿主机直连 9090 可能连不到。
-        # 这种情况下退回 compose healthcheck 的结论。
-        if [ "$prom_code" = "200" ] || [ -z "$prom_code" ]; then
+        # 再从 data 网内探一次 /-/healthy（compose healthcheck 探的也是它），
+        # 覆盖「healthcheck 自身配错 / 服务发现不通」。prometheus 只在 internal
+        # data 网、不对宿主发布端口，宿主 curl 9090 必然 000 —— 经同在 data 网
+        # 的 backend 一跳（cd_prom_call，见 lib.sh）。healthcheck 已绿而这步失败，
+        # 才是网络/服务发现真有问题。
+        if cd_prom_call /-/healthy >/dev/null 2>&1; then
             ok prometheus "healthy"
         else
-            bad prometheus "healthcheck 说 healthy 但 /-/healthy 返回 $prom_code"
+            bad prometheus "healthcheck 说 healthy，但 data 网内 /-/healthy 探不通"
         fi
     else
         bad prometheus "state=$health（期望 healthy）"
