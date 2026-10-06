@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.3](https://github.com/farhub-wq/Agent-Harness/compare/v1.0.2...v1.0.3) (2026-10-06)
+
+
+### 文档
+
+* 更新 README，记录 2026-10-06 真机修复与 v1.0.2 发布 ([903282b](https://github.com/farhub-wq/Agent-Harness/commit/903282b1f4eea3816c3dc8aece5084314517a67e))
+
 ## [1.0.2](https://github.com/farhub-wq/Agent-Harness/compare/v1.0.1...v1.0.2) (2026-10-06)
 
 
