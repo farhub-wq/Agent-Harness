@@ -268,7 +268,13 @@ cd_image_refs() {
     export FRONTEND_IMAGE="${prefix}${CD_FRONTEND_IMAGE_NAME}:$tag"
     export MOCK_ERP_IMAGE="${prefix}${CD_MOCK_IMAGE_NAME}:$tag"
     export CD_HAS_REGISTRY=0
-    [ -n "$prefix" ] && export CD_HAS_REGISTRY=1
+    # 必须用 if，不能写 `[ -n "$prefix" ] && export ...`：这是函数最后一条
+    # 语句，prefix 为空时整体返回 1，调用方（deploy.sh）在 set -e 下静默退出 ——
+    # 与 cd_registry_prefix 是同一类真机踩出来的 bug，表现为 deploy 死在
+    # 「磁盘可用」之后、版本号打印之前，退出码 1 且没有任何 !! 信息。
+    if [ -n "$prefix" ]; then
+        export CD_HAS_REGISTRY=1
+    fi
 }
 
 cd_all_images() { printf '%s\n' "$APP_IMAGE" "$FRONTEND_IMAGE" "$MOCK_ERP_IMAGE"; }

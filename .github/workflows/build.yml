@@ -129,12 +129,15 @@ jobs:
           # webhook URL 的 host 段决定通道格式：飞书 open.feishu、企微 qyapi.weixin、
           # 钉钉 oapi.dingtalk。三家的 text payload 形状一致，只有外层信封不同。
           # generic 路径兜住 server酱以外的任何 URL（发一个 JSON body）。
+          # 续行必须与块标量保持缩进：顶格写会让 YAML 在这里断开，
+          # 整个 workflow 解析失败 —— GitHub 上表现为每次 push 都有一个
+          # 没有 job 的 startup_failure 幽灵 run，tag 触发的构建从未跑过。
           TEXT="❌ 构建失败
-版本：${VERSION:-未知}
-仓库：$REPO
-触发者：$ACTOR
- Actions：https://github.com/$REPO/actions/runs/$RUN_ID
-时间：$(date -u '+%F %T UTC')"
+          版本：${VERSION:-未知}
+          仓库：$REPO
+          触发者：$ACTOR
+          Actions：https://github.com/$REPO/actions/runs/$RUN_ID
+          时间：$(date -u '+%F %T UTC')"
 
           # JSON 转义：优先 python3，不可用时兜底删掉反斜杠和引号、换行折空格。
           # 与 notify.sh 的 json_escape 同一思路 —— 这里不能 source 它，原因见上。
