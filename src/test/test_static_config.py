@@ -167,24 +167,60 @@ class TestNginxAuthStructure(unittest.TestCase):
                 self.assertIn("proxy_set_header X-Authenticated-User", block,
                               f"location {selector} 没有转发 X-Authenticated-User")
 
-    def test_auth_basic_off_only_on_health_endpoints(self):
-        """`auth_basic off` 只允许出现在两个探活 location 上。
+    def _all_location_blocks(self):
+        """返回 [(selector, block_text), ...]，覆盖每个 server 块里的全部
+        location（:80 与 :443 各有一组探针，所以不能只取第一个匹配）。"""
+        out = []
+        for m in re.finditer(r"^[ \t]*location\s+(.+?)\s*\{", self.conf, re.MULTILINE):
+            selector = m.group(1).strip()
+            start = m.end() - 1
+            depth = 0
+            for i in range(start, len(self.conf)):
+                if self.conf[i] == "{":
+                    depth += 1
+                elif self.conf[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        out.append((selector, self.conf[start:i + 1]))
+                        break
+        return out
 
-        每多一处，那个 location 就静默不认证了 —— 而这些 location 由
-        `auth_basic "ERP Agent";` 在 server 上下文统一保护，单看那个 location
-        是看不出问题的。
+    def test_auth_basic_off_only_on_health_endpoints(self):
+        """`auth_basic off` 只能出现在探活 location 上，且每个探针都必须免认证。
+
+        不数全局固定数量：:80 与 :443(TLS) 各有一组 /healthz、/health，server
+        块数量会随拓扑增长。直接枚举每个 location 块做两条双向断言更稳：
+          - 任何免认证的 location，选择器必须是 = /healthz 或 = /health
+            （抓住「某个业务 location 被静默放行」这个真实漏洞）；
+          - 这两个探针 location 必须 auth_basic off（探针带不了凭据）。
         """
-        offs = re.findall(r"^\s*auth_basic\s+off\s*;", self.conf, re.MULTILINE)
+        blocks = self._all_location_blocks()
+        self.assertTrue(blocks, "nginx.conf 里一个 location 块都没解析出来？")
+
+        health = {"= /healthz", "= /health"}
+        off_selectors = []
+        for selector, block in blocks:
+            if re.search(r"^\s*auth_basic\s+off\s*;", block, re.MULTILINE):
+                off_selectors.append(selector)
+
+        unauth = [s for s in off_selectors if s not in health]
         self.assertEqual(
-            len(offs), 2,
-            f"nginx.conf 里有 {len(offs)} 处 `auth_basic off;`，期望恰好 2 处"
-            f"（/healthz 与 /health）。探针带不了凭据，所以这两个必须免认证；"
-            f"其余任何 location 免认证都是漏洞。",
+            unauth, [],
+            f"这些非探活 location 配了 auth_basic off，属于未认证放行：{unauth}",
         )
-        for selector in ("= /healthz", "= /health"):
-            with self.subTest(location=selector):
-                self.assertIn("auth_basic off;", self._location_block(selector),
-                              f"location {selector} 应当 auth_basic off（探针带不了凭据）")
+
+        present = {s for s, _ in blocks}
+        missing = sorted(h for h in health if h in present
+                         and not any(s == h for s in off_selectors))
+        self.assertEqual(
+            missing, [],
+            f"探针 location {missing} 应当 auth_basic off（探针带不了凭据）",
+        )
+        # 至少 :80 一组，防止前面的断言在「整份配置没有任何 off」时被空集绕过。
+        self.assertGreaterEqual(
+            len(off_selectors), 2,
+            f"auth_basic off 只有 {len(off_selectors)} 处，至少应有 :80 的一组探针",
+        )
 
     def test_internal_token_include_is_in_server_context(self):
         """include 必须在 server 上下文里，两个 /api location 才继承得到它。"""

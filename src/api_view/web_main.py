@@ -108,17 +108,21 @@ app.add_middleware(
 
 # Prometheus 指标：/metrics 端点由 instrumentator 自动挂载，暴露
 # http_request_duration_seconds / http_requests_total 等，供 Prometheus 抓取。
-# 指标路径不认证（Prometheus 从 edge 网络内抓取，带不了 Basic Auth），
+# 指标路径不认证（Prometheus 从 data 网络内抓取，带不了 Basic Auth），
 # 但只暴露聚合计数，不含请求体或用户标识。
+#
+# 参数名必须与安装到的大版本对齐：requirements 是 >=7，pip 会解析到 8.x。
+# 8.x 没有 should_gauge（传了在构造期 TypeError，backend 直接起不来——CI 集成
+# 栈因此 unhealthy）；默认就不建 per-handler gauge，只输出按 handler 名分桶的
+# counter/histogram，基数由路由模板（而非实际 URL）控制。expose 的 OpenAPI
+# 开关叫 include_in_schema，不是 include_render_schema；tags 是 OpenAPI 的
+# List[str]，与 Prometheus relabel 无关（relabel 在 prometheus.yml 做）。
 from prometheus_fastapi_instrumentator import Instrumentator
 
-Instrumentator(
-    should_gauge=lambda handler: False,  # 不为每个 handler 单独建 gauge，控制基数
-).instrument(app).expose(
+Instrumentator().instrument(app).expose(
     app,
     endpoint="/metrics",
-    include_render_schema=False,  # 不暴露 OpenConfig，减少攻击面
-    tags={"component": "backend"},  # Prometheus relabel 用
+    include_in_schema=False,  # 不把 /metrics 写进 OpenAPI 文档，减少攻击面
 )
 
 # 注册路由

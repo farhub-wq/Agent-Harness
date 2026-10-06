@@ -448,12 +448,26 @@ dr_run_backup() {
 
     dbs="$(dr_discover_dbs)"
     if [ -z "$dbs" ]; then
-        warn "一个业务库都没枚举到 —— 只有 admin/local/config。"
-        warn "  这通常意味着连不上 Mongo 或权限不足，不是「确实没数据」。"
-        return 1
+        # 「枚举为空」有两种完全不同的成因，必须分开：
+        #   A. 连不上 / 认证失败 —— dr_discover_dbs 的 || true 会把 mongosh 的
+        #      非零退出吞成空列表。这是真故障，硬失败。
+        #   B. 连接、认证、listDatabases 全部成功，只是这台 Mongo 里确实还没有
+        #      业务库 —— 全新部署在应用第一次写入前就是这个状态。把它当故障会让
+        #      **任何一台新机器的第一次发布永远过不了备份关**（真机首次纳管踩到）。
+        # 用带哨兵的调用重跑一次来区分：抛异常（认证/授权失败）→ 无哨兵 → A；
+        # 命令成功只是结果为空 → 有哨兵 → B。
+        if dr_mongo_eval_checked 'db.adminCommand({listDatabases:1});' >/dev/null 2>&1; then
+            warn "枚举成功但没有任何业务库（admin/local/config 除外）—— 全新部署的初始状态。"
+            warn "  数据库部分按空基线备份（空清单 + restore 自检空==空），download-data 卷照常打包。"
+        else
+            warn "一个业务库都没枚举到，且 listDatabases 未能成功执行 —— 连不上 Mongo 或权限不足。"
+            return 1
+        fi
     fi
     log "备份到 $dir"
-    info "枚举到 $(printf '%s\n' "$dbs" | grep -c .) 个库：$(printf '%s' "$dbs" | tr '\n' ' ')"
+    if [ -n "$dbs" ]; then
+        info "枚举到 $(printf '%s\n' "$dbs" | grep -c .) 个库：$(printf '%s' "$dbs" | tr '\n' ' ')"
+    fi
 
     mkdir -p "$dir"
     : > "$dir/counts.tsv"
