@@ -1,56 +1,78 @@
-"""联网搜索工具的离线回归测试（不触发真实 DeepSeek 请求）。"""
+"""web_search 工具的离线回归测试（不触发真实 ChatAnywhere 请求）。"""
 from __future__ import annotations
 
 import unittest
 from unittest.mock import patch
 
-from src.agent.tools.web_search import _extract_response_text, web_search
+from src.agent.tools.web_search import web_search
 
 
 class WebSearchTests(unittest.TestCase):
-    def test_extracts_responses_api_output_text(self):
-        self.assertEqual(
-            _extract_response_text({"output_text": "搜索摘要"}), "搜索摘要"
-        )
-
-    def test_extracts_nested_message_output(self):
-        payload = {
-            "output": [
-                {"type": "web_search_call", "action": {"type": "search"}},
-                {
-                    "type": "message",
-                    "content": [{"type": "output_text", "text": "搜索结果"}],
-                },
-            ]
-        }
-        self.assertEqual(_extract_response_text(payload), "搜索结果")
-
-    def test_uses_deepseek_key_and_responses_web_search_tool(self):
+    def test_uses_chatanywhere_key_and_chat_completions(self):
         class Response:
             status_code = 200
             text = ""
 
             @staticmethod
             def json():
-                return {"output_text": "DeepSeek 搜索摘要"}
+                return {
+                    "choices": [
+                        {"message": {"content": "搜索摘要结果"}}
+                    ]
+                }
 
         with patch(
             "src.agent.tools.web_search.get_env",
             side_effect=lambda key, default="": {
-                "DEEPSEEK_API_KEY": "test-key",
-                "LLM_MODEL": "qwen3.8-27b",  # 旧配置不应影响搜索模型
+                "CHATANYWHERE_API_KEY": "test-key",
+                "LLM_BASE_URL": "https://api.chatanywhere.tech/v1",
+                "LLM_MODEL": "gpt-4o-mini",
+                "WEB_SEARCH_MODEL": "gpt-4o-mini",
             }.get(key, default),
         ), patch(
             "src.agent.tools.web_search.httpx.post", return_value=Response()
         ) as post:
             result = web_search.invoke({"query": "测试查询"})
 
-        self.assertEqual(result, "DeepSeek 搜索摘要")
-        self.assertEqual(post.call_args.args[0], "https://api.deepseek.com/responses")
+        self.assertEqual(result, "搜索摘要结果")
+        self.assertEqual(
+            post.call_args.args[0],
+            "https://api.chatanywhere.tech/v1/chat/completions",
+        )
         payload = post.call_args.kwargs["json"]
-        self.assertEqual(payload["model"], "deepseek-flash")
-        self.assertEqual(payload["tools"], [{"type": "web_search"}])
-        self.assertEqual(payload["tool_choice"], {"type": "web_search"})
+        self.assertEqual(payload["model"], "gpt-4o-mini")
+        self.assertEqual(payload["messages"][1]["content"], "测试查询")
+
+    def test_missing_api_key_returns_error(self):
+        with patch(
+            "src.agent.tools.web_search.get_env",
+            return_value="",
+        ):
+            result = web_search.invoke({"query": "测试查询"})
+        self.assertIn("CHATANYWHERE_API_KEY", result)
+
+    def test_non_200_returns_error_message(self):
+        class Response:
+            status_code = 401
+            text = "Unauthorized"
+
+            @staticmethod
+            def json():
+                return {"error": {"message": "invalid api key"}}
+
+        with patch(
+            "src.agent.tools.web_search.get_env",
+            side_effect=lambda key, default="": {
+                "CHATANYWHERE_API_KEY": "bad-key",
+                "LLM_BASE_URL": "https://api.chatanywhere.tech/v1",
+                "WEB_SEARCH_MODEL": "gpt-4o-mini",
+            }.get(key, default),
+        ), patch(
+            "src.agent.tools.web_search.httpx.post", return_value=Response()
+        ):
+            result = web_search.invoke({"query": "测试查询"})
+        self.assertIn("搜索失败", result)
+        self.assertIn("invalid api key", result)
 
 
 if __name__ == "__main__":

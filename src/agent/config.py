@@ -2,25 +2,27 @@
 全局配置模块
 LLM、Store、Checkpointer、沙箱连接参数
 """
-from langchain_deepseek import ChatDeepSeek
+from langchain_openai import ChatOpenAI
 
 from .env_utils import get_env, get_env_int
 
 # ============ LLM 配置 ============
-LLM_MODEL = get_env("LLM_MODEL", "deepseek-flash")
-LLM_BASE_URL = get_env("LLM_BASE_URL", "https://api.deepseek.com")
-LLM_API_KEY = get_env("DEEPSEEK_API_KEY", "")
+# ChatAnywhere：OpenAI 兼容的 API 网关，支持 gpt-4o / claude / deepseek 等模型。
+# 文档：https://chatanywhere.apifox.cn
+LLM_MODEL = get_env("LLM_MODEL", "gpt-4o-mini")
+LLM_BASE_URL = get_env("LLM_BASE_URL", "https://api.chatanywhere.tech/v1")
+LLM_API_KEY = get_env("CHATANYWHERE_API_KEY", "")
 LLM_TEMPERATURE = 0.1
 LLM_MAX_TOKENS = 4096
-LLM_REASONING_EFFORT = get_env("LLM_REASONING_EFFORT", "high")
 
 
 def get_llm(*, thinking: bool = True, timeout: float | None = None,
-            max_retries: int = 2, max_tokens: int = LLM_MAX_TOKENS) -> ChatDeepSeek:
-    """获取 DeepSeek 模型实例。
+            max_retries: int = 2, max_tokens: int = LLM_MAX_TOKENS) -> ChatOpenAI:
+    """获取 ChatOpenAI 模型实例（通过 ChatAnywhere 网关）。
 
-    主 Agent 使用思考模式；需要强制结构化输出的内部评审器使用
-    非思考模式，避免 DeepSeek 拒绝 ``tool_choice`` 参数。
+    主 Agent 使用默认配置；需要强制结构化输出的内部评审器使用
+    非思考模式（显式设置 temperature），避免 reasoning 模型拒绝
+    ``tool_choice`` 参数。
     """
     common_kwargs = {
         "model": LLM_MODEL,
@@ -32,15 +34,11 @@ def get_llm(*, thinking: bool = True, timeout: float | None = None,
     if timeout is not None:
         common_kwargs["timeout"] = timeout
     if thinking:
-        return ChatDeepSeek(
-            **common_kwargs,
-            reasoning_effort=LLM_REASONING_EFFORT,
-            extra_body={"thinking": {"type": "enabled"}},
-        )
-    return ChatDeepSeek(
+        # 思考模式：不设 temperature（reasoning 模型通常忽略或拒绝该参数）
+        return ChatOpenAI(**common_kwargs)
+    return ChatOpenAI(
         **common_kwargs,
         temperature=LLM_TEMPERATURE,
-        extra_body={"thinking": {"type": "disabled"}},
     )
 
 
@@ -82,7 +80,7 @@ CORS_ALLOW_ORIGINS = [
 ]
 # 沙箱不可用时是否允许退回到 LocalShellBackend / 无安全参数的容器。
 # 本机开发可开；容器部署必须为 false —— local shell 会在 backend 进程环境
-# （含 DEEPSEEK_API_KEY、可写的 skills 挂载）里执行模型生成的代码。
+# （含 CHATANYWHERE_API_KEY、可写的 skills 挂载）里执行模型生成的代码。
 ALLOW_LOCAL_SHELL_FALLBACK = get_env(
     "ALLOW_LOCAL_SHELL_FALLBACK", "true"
 ).lower() in ("1", "true", "yes")

@@ -10,7 +10,7 @@
 #   .venv/                  Windows 二进制，461MB，服务器上用不到
 #   frontend/node_modules/  418MB，服务器上 docker build 会重新装
 #   frontend/.next/         同上
-#   .env  deploy/.env       含本机的 DeepSeek key 与 Mongo 密码。根 .env 是宿主
+#   .env  deploy/.env       含本机的 ChatAnywhere key 与 Mongo 密码。根 .env 是宿主
 #                           进程开发用的（容器不读它，Dockerfile 里也没 COPY），
 #                           deploy/.env 服务器上由 bootstrap.sh 从 .env.example 重新生成
 #   deploy/nginx/htpasswd   认证凭据，服务器上重新生成

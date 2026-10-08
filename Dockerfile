@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 # 只拷 src/，不要 COPY .：
 #   1) main_agent._upload_project_to_sandbox 用 PROJECT_ROOT.rglob("*") 把整棵树
 #      打包上传进沙箱的 tmpfs /tmp，镜像里多一个字节都会被传一次；
-#   2) .env（含 DEEPSEEK_API_KEY）绝不能进镜像。
+#   2) .env（含 CHATANYWHERE_API_KEY）绝不能进镜像。
 COPY src/ /app/src/
 
 # src/download 由 docker-compose 挂载覆盖；这里先建出来，保证直接 docker run

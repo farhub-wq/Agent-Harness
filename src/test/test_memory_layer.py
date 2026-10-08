@@ -1,6 +1,6 @@
 """三层记忆（HOT/WARM/COLD）的验证测试。
 
-设计原则：**不依赖 MongoDB、Docker、DeepSeek、langchain**，用内存假 Store 跑，
+设计原则：**不依赖 MongoDB、Docker、LLM API、langchain**，用内存假 Store 跑，
 所以 `python -m src.test.test_memory_layer` 在任何 Python 3.10+ 上都能跑通。
 
 覆盖：

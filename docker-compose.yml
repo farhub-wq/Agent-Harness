@@ -1,6 +1,6 @@
 # ERP-AGENT 容器化部署
 #
-#   cp deploy/.env.example deploy/.env   # 填 DEEPSEEK_API_KEY 和 PUBLIC_BASE_URL
+#   cp deploy/.env.example deploy/.env   # 填 CHATANYWHERE_API_KEY 和 PUBLIC_BASE_URL
 #   docker compose up -d
 #
 # 注意：所有密钥与可调项都走 deploy/.env（通过 env_file 注入）。compose 文件里
@@ -25,7 +25,7 @@ services:
   # 数据层
   # ============================================================
   mongo:
-    image: mongo:6.0
+    image: mongo:8.0
     <<: *logging
     restart: unless-stopped
     env_file: [./deploy/.env]
@@ -50,7 +50,7 @@ services:
   # 注意：backend 能驱动 daemon API，而 dind 是 privileged —— 隔离边界仍在
   # 宿主机层面，不是安全沙箱的替代品，只应部署在受控网络内。
   dind:
-    image: docker:27-dind
+    image: docker:28-dind
     <<: *logging
     restart: unless-stopped
     privileged: true
@@ -93,7 +93,7 @@ services:
   # 把沙箱基础镜像预先灌进 dind。
   # 不这么做的话，首次 containers.run 里会夹一次 >60s 的镜像 pull。
   sandbox-image-loader:
-    image: docker:27-cli
+    image: docker:28-cli
     <<: *logging
     restart: "no"
     # SANDBOX_IMAGE 从 deploy/.env 读，与 backend 用同一个值
@@ -169,7 +169,7 @@ services:
       ERP_BASE_URL: http://mock-erp:8081
       DOCKER_HOST: tcp://dind:2375
       # 容器部署必须关：否则沙箱不可用时会在 backend 进程环境里
-      # （含 DEEPSEEK_API_KEY）执行模型生成的代码。
+      # （含 CHATANYWHERE_API_KEY）执行模型生成的代码。
       ALLOW_LOCAL_SHELL_FALLBACK: "false"
       # 认人由 nginx 的 auth_basic 做，backend 只信它注入的 X-Authenticated-User。
       # 前提是 backend 不对外发布端口 —— compose 里确实没有 ports，
@@ -230,7 +230,7 @@ services:
   # 数据保留由 PROMETHEUS_RETENTION 控制（默认 15d），放 named volume
   # 让重启不丢历史。
   prometheus:
-    image: prom/prometheus:v3.2.1
+    image: prom/prometheus:v3.13.4
     <<: *logging
     restart: unless-stopped
     env_file: [./deploy/.env]
@@ -253,7 +253,7 @@ services:
   #（deploy/grafana/provisioning/），开机即就绪、不需要手工配。
   # 端口 13000 避开常用端口；GRAFANA_PASSWORD 留空时 bootstrap.sh 随机生成。
   grafana:
-    image: grafana/grafana:11.4.0
+    image: grafana/grafana:13.2.3
     <<: *logging
     restart: unless-stopped
     env_file: [./deploy/.env]
@@ -280,7 +280,7 @@ services:
   # 统一入口
   # ============================================================
   nginx:
-    image: nginx:1.27-alpine
+    image: nginx:1.29-alpine
     <<: *logging
     restart: unless-stopped
     ports:
@@ -325,7 +325,7 @@ services:
 
 networks:
   edge:
-    # 默认网络：backend 靠它出网调 api.deepseek.com
+    # 默认网络：backend 靠它出网调 ChatAnywhere API
   data:
     internal: true
   sandbox:

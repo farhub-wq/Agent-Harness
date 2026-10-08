@@ -5,7 +5,7 @@
 #   sudo -E bash deploy/cloud/bootstrap.sh <公网IP或域名>
 #
 # 可选环境变量：
-#   DEEPSEEK_API_KEY=sk-xxx    不传则 .env 留空，脚本最后提示你手动补
+#   CHATANYWHERE_API_KEY=sk-xxx  不传则 .env 留空，脚本最后提示你手动补
 #   LOGIN_USER=admin            nginx Basic Auth 用户名
 #   LOGIN_PASSWORD=xxx         不传则随机生成并打印（只打印这一次）
 #   HTTP_PORT=80               对外 HTTP 端口
@@ -37,7 +37,7 @@ HTTPS_PORT="${HTTPS_PORT:-443}"
 TLS_ENABLED="${TLS_ENABLED:-}"
 REGISTRY_URL="${REGISTRY_URL:-}"
 LOGIN_USER="${LOGIN_USER:-admin}"
-DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
+CHATANYWHERE_API_KEY="${CHATANYWHERE_API_KEY:-}"
 
 log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
@@ -156,8 +156,8 @@ else
     sed -i "s|^MONGODB_URI=.*|MONGODB_URI=mongodb://erpadmin:$MONGO_PW@mongo:27017/erp_agent?authSource=admin|" deploy/.env
     sed -i "s|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=http://$PUBLIC_HOST|" deploy/.env
     sed -i "s|^CORS_ALLOW_ORIGINS=.*|CORS_ALLOW_ORIGINS=http://$PUBLIC_HOST|" deploy/.env
-    if [ -n "$DEEPSEEK_API_KEY" ]; then
-        sed -i "s|^DEEPSEEK_API_KEY=.*|DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY|" deploy/.env
+    if [ -n "$CHATANYWHERE_API_KEY" ]; then
+        sed -i "s|^CHATANYWHERE_API_KEY=.*|CHATANYWHERE_API_KEY=$CHATANYWHERE_API_KEY|" deploy/.env
     fi
     # Grafana 管理员密码：留空时用默认 admin（不安全），这里随机生成一份。
     # 与 MONGO 密码一样只生成一次，要换改 .env 重跑。
@@ -318,8 +318,8 @@ echo "  /healthz  $CODE（200 = nginx 存活）"
 echo "  /health   $CODE2（200 = 后端就绪）"
 echo "  Grafana   http://$PUBLIC_HOST:${GRAFANA_PORT:-13000}  admin / （见 deploy/.env 的 GRAFANA_PASSWORD）"
 echo
-if ! grep -q '^DEEPSEEK_API_KEY=.\+' deploy/.env; then
-    echo "  !! deploy/.env 里 DEEPSEEK_API_KEY 还是空的，对话会全部失败。补上后："
+if ! grep -q '^CHATANYWHERE_API_KEY=.\+' deploy/.env; then
+    echo "  !! deploy/.env 里 CHATANYWHERE_API_KEY 还是空的，对话会全部失败。补上后："
     echo "       docker compose up -d backend mcp"
 fi
 echo "  !! 云厂商控制台的**安全组**是另一道墙，脚本改不了："

@@ -149,7 +149,7 @@
 
 | 层级 | 技术 | 说明 |
 |------|------|------|
-| **LLM** | DeepSeek deepseek-flash | DeepSeek API（对话、grader、联网搜索共用） |
+| **LLM** | ChatAnywhere (gpt-4o-mini) | OpenAI 兼容网关，对话、grader、联网搜索共用 |
 | **Agent 框架** | DeepAgent + LangGraph | 状态图引擎，支持中断/恢复/子Agent |
 | **MCP 协议** | FastMCP + SSE | Agent ↔ ERP 的工具桥接层 |
 | **Web 框架** | FastAPI + Uvicorn | SSE 流式响应 |
@@ -446,7 +446,7 @@ ERP-AGENT/
 ## Docker 部署（推荐用于服务器）
 
 ```bash
-cp deploy/.env.example deploy/.env   # 填 DEEPSEEK_API_KEY 和 PUBLIC_BASE_URL
+cp deploy/.env.example deploy/.env   # 填 CHATANYWHERE_API_KEY 和 PUBLIC_BASE_URL
 # 创建登录账号，否则 nginx 起不来（htpasswd 的三种生成方式见 deploy/README.md）
 docker run --rm httpd:2.4-alpine htpasswd -nbB 张三 '你的密码' > deploy/nginx/htpasswd
 # 生成 nginx ↔ backend 的共享密钥（对公网部署必配，原因见 deploy/README.md）
@@ -464,7 +464,7 @@ nginx 统一入口 `:80`，后端 / 前端 / MongoDB / MCP / 沙箱 dind 全部�
 
 ```bash
 bash deploy/cloud/pack.sh /tmp/erp-agent-deploy.tar.gz   # 本机打包
-DEEPSEEK_API_KEY=sk-xxxx bash deploy/cloud/bootstrap.sh <服务器IP>   # 服务器上
+CHATANYWHERE_API_KEY=sk-xxxx bash deploy/cloud/bootstrap.sh <服务器IP>   # 服务器上
 ```
 
 整个服务在 nginx 的 HTTP Basic Auth 后面，backend 用 nginx 注入的用户名决定
@@ -476,6 +476,55 @@ DEEPSEEK_API_KEY=sk-xxxx bash deploy/cloud/bootstrap.sh <服务器IP>   # 服务
 
 ---
 
+## 本地开发 vs 服务器生产：两套配置，互不干涉
+
+| | 本地开发 | 服务器生产 |
+|---|---|---|
+| 配置文件 | 项目根 `.env`（gitignore + dockerignore，不进库不进镜像） | `deploy/.env` + `deploy/nginx.env` + `htpasswd`（package.filter 保护，同步永不覆盖） |
+| 地址 | localhost / 127.0.0.1 | 容器服务名（mongo / mcp / backend…） |
+| 加载方式 | [env_utils.py](src/agent/env_utils.py) 读根 `.env`，`override=False` | compose `env_file` 注入，优先级高于根 `.env` |
+| 运行形态 | 进程直跑（下面「快速启动」） | docker compose 容器（上面「Docker 部署」） |
+
+两条不要越界的规则：
+
+- **本地不要跑 `docker compose up`** —— 那是服务器形态：compose 会把根 `.env` 当插值源，且缺 `deploy/.env` 直接报错。
+- **服务器上没有也不该有根 `.env`** —— 生产树由 `git archive` + rsync 同步，根 `.env` 在排除清单里，物理上到不了服务器。
+
+## 直推发布（日常迭代）
+
+tag 发布流水线（release-please → build.yml → deploy.yml 人工审批）之外，还有一条
+**本地直推**路径用于日常迭代：一条命令把当前分支发上生产，运行时安全链
+（备份/迁移/影子/观察窗/自动回滚）与正式发布完全相同，只是免去了 PR 与人工审批。
+
+```powershell
+# 本地（Windows；Git Bash 用 scripts/push-prod.sh）
+powershell -File scripts\push-prod.ps1
+```
+
+它做的事：断言工作区干净（只发布已提交内容）→ 本地快速检查（ruff + compileall + pytest）→
+push GitHub（保持真相源）→ push 服务器裸仓库 → 服务器 hook 自动构建镜像并走 deploy.sh
+完整发布链，输出以 `remote:` 前缀实时回显，全程约 6-8 分钟（含 300s 观察窗）。
+
+> 注意：post-receive 的退出码不影响 push 本身 —— **push 成功 ≠ 部署成功**。
+> 部署失败会以 `remote:  !!` 开头的行出现在输出里，此时生产已自动回滚，修复后再推即可。
+
+**一次性配置**：
+
+```bash
+# 本地
+git remote add server ssh://root@121.41.73.188/srv/erp-agent.git
+# ~/.ssh/config：Host 121.41.73.188 配 IdentityFile 指向服务器私钥
+
+# 服务器（root，一次性）
+git clone /srv/erp-agent.git /srv/erp-agent-build
+cp /root/erp-agent/deploy/cloud/post-receive.hook /srv/erp-agent.git/hooks/post-receive
+chmod 755 /srv/erp-agent.git/hooks/post-receive
+```
+
+只推 `main` 会触发部署；推其他分支到 server 只是存一份服务器侧备份，不部署。
+
+---
+
 ## 快速启动
 
 ### 环境要求
@@ -484,7 +533,7 @@ DEEPSEEK_API_KEY=sk-xxxx bash deploy/cloud/bootstrap.sh <服务器IP>   # 服务
 - Node.js 18+
 - MongoDB 6.0+
 - Docker Desktop（已启动）
-- DeepSeek API Key（对话、grader、联网搜索共用）
+- ChatAnywhere API Key（对话、grader、联网搜索共用）
 
 ### 1. 克隆项目 & 安装依赖
 
@@ -507,12 +556,12 @@ cd ..
 编辑项目根目录 `.env` 文件：
 
 ```bash
-# DeepSeek API Key（主对话、grader、联网搜索共用）
-DEEPSEEK_API_KEY=sk-xxxx
-LLM_MODEL=deepseek-flash
-LLM_BASE_URL=https://api.deepseek.com
-WEB_SEARCH_MODEL=deepseek-flash
-DEEPSEEK_RESPONSES_URL=https://api.deepseek.com/responses
+# ChatAnywhere API Key（主对话、grader、联网搜索共用）
+# 获取地址: https://chatanywhere.apifox.cn
+CHATANYWHERE_API_KEY=sk-xxxx
+LLM_MODEL=gpt-4o-mini
+LLM_BASE_URL=https://api.chatanywhere.tech/v1
+WEB_SEARCH_MODEL=gpt-4o-mini
 
 # MongoDB 连接
 MONGODB_URI=mongodb://localhost:27017
@@ -679,7 +728,7 @@ backend 在 `AUTH_MODE=proxy` 下按它们派生 `user_id` 并校验共享密钥
 
 | 文件 | 内容 |
 |------|------|
-| `.env` | DeepSeek API Key、本地 Mongo 连接串 |
+| `.env` | ChatAnywhere API Key、本地 Mongo 连接串 |
 | `deploy/.env` | 容器部署的 Mongo 密码、API Key |
 | `deploy/nginx.env` | nginx ↔ backend 共享密钥 |
 | `deploy/nginx/htpasswd` | Basic Auth 密码哈希 |
@@ -708,6 +757,6 @@ bash deploy/cd/leak-check.sh --tree
 - 上游项目：[wodrake/ERP-AGENT-open-source](https://github.com/wodrake/ERP-AGENT-open-source)（Agent 侧开源实现，本项目在其之上继续开发）
 - Agent 框架：[DeepAgent](https://github.com/langchain-ai/deepagents) + [LangGraph](https://github.com/langchain-ai/langgraph)
 - 工具协议：[Model Context Protocol](https://modelcontextprotocol.io/)
-- 模型：DeepSeek
+- 模型：ChatAnywhere（OpenAI 兼容网关，支持 gpt-4o / claude / deepseek 等）
 
 本项目仓库未附 License 文件，如需商用请先确认上游的授权条款。

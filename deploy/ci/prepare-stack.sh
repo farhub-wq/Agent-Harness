@@ -41,7 +41,7 @@ HTPASSWD="deploy/nginx/htpasswd"
 CRED_FILE="deploy/ci/.ci-credentials.sh"
 
 # 写在生成文件第一行的标记。它的唯一作用是让下面的防呆能区分「这是脚本生成的」
-# 和「这是人配的真实配置」—— deploy/.env 里有真实的 DEEPSEEK_API_KEY，
+# 和「这是人配的真实配置」—— deploy/.env 里有真实的 CHATANYWHERE_API_KEY，
 # 误覆盖一次的代价是有人要去找回自己的 Key。
 CI_MARKER="# GENERATED-BY: deploy/ci/prepare-stack.sh（CI 专用，可随时重建）"
 
@@ -97,7 +97,7 @@ set_var "$ENV_FILE" MONGODB_URI \
 # 假 Key，但形态要像真的：backend 的 lifespan 不构造模型，所以这里不会被用到。
 # 用 sk-dummy 前缀是为了命中 .gitleaks.toml 的 allowlist（虽然 .env 被 gitignore、
 # 不会进历史，但本地 detect --no-git 扫目录时不该报一条假阳性）。
-set_var "$ENV_FILE" DEEPSEEK_API_KEY "sk-dummy-ci-not-a-real-key"
+set_var "$ENV_FILE" CHATANYWHERE_API_KEY "sk-dummy-ci-not-a-real-key"
 set_var "$ENV_FILE" PUBLIC_BASE_URL "http://127.0.0.1"
 set_var "$ENV_FILE" CORS_ALLOW_ORIGINS "http://127.0.0.1"
 set_var "$ENV_FILE" INTERNAL_AUTH_TOKEN "$TOKEN"

@@ -50,6 +50,9 @@ def _upload_project_to_sandbox(sandbox) -> bool:
         # 生成物/临时目录：整棵树会被打包上传进沙箱一次，
         # 这里多一个字节就多传一次。
         "download", "tmp", "*.tar.gz", "*.tar",
+        # 本地开发数据目录：MongoDB 数据/日志（含被进程锁定的 .lock 文件），
+        # 不可读也无需传入沙箱。
+        ".mongo-data", ".mongo-log",
     ]
 
     def _should_skip(rel_path: str) -> bool:
@@ -67,6 +70,7 @@ def _upload_project_to_sandbox(sandbox) -> bool:
         sandbox.execute(f"mkdir -p '{remote_dir}'")
 
         tar_stream = io.BytesIO()
+        skipped_errors = []
         with tarfile.open(fileobj=tar_stream, mode="w:gz") as tar:
             for file_path in sorted(PROJECT_ROOT.rglob("*")):
                 if not file_path.is_file():
@@ -74,7 +78,17 @@ def _upload_project_to_sandbox(sandbox) -> bool:
                 rel = str(file_path.relative_to(PROJECT_ROOT)).replace("\\", "/")
                 if _should_skip(rel):
                     continue
-                tar.add(str(file_path), arcname=rel)
+                # 单个文件不可读（如被进程锁定的 .lock）不应中断整个上传，
+                # 跳过并记录，其余文件照常打包。
+                try:
+                    tar.add(str(file_path), arcname=rel)
+                except (PermissionError, OSError) as e:
+                    skipped_errors.append(f"{rel}: {e}")
+        if skipped_errors:
+            agent_logger.warning(
+                f"Skipped {len(skipped_errors)} unreadable file(s) during "
+                f"project upload: {skipped_errors[:3]}"
+            )
 
         tar_stream.seek(0)
         data = tar_stream.read()
@@ -254,7 +268,7 @@ def create_main_agent(
     创建主 Agent 实例
 
     组装顺序（严格遵循文档）：
-    1. LLM（DeepSeek）
+    1. LLM（ChatAnywhere 网关，OpenAI 兼容）
     2. CompositeBackend 三层路由（default=sandbox, /memories/=Store, /persisted-skills/=Store）
     3. 工具加载（MCP + chart + web_search + hitl）
     4. 子Agent配置（YAML声明式）
@@ -301,7 +315,7 @@ def create_main_agent(
     except Exception as e:
         if not ALLOW_LOCAL_SHELL_FALLBACK:
             # LocalShellBackend 在 backend 进程自身的工作目录里执行模型生成的
-            # 代码 —— 那里有 DEEPSEEK_API_KEY、可写的 skills 挂载和整个 /app。
+            # 代码 —— 那里有 CHATANYWHERE_API_KEY、可写的 skills 挂载和整个 /app。
             # 容器部署下宁可直接失败，也不要静默把沙箱换成裸进程。
             agent_logger.error(
                 f"Managed Docker sandbox unavailable ({e}); LocalShell fallback "

@@ -1,4 +1,10 @@
-"""使用 DeepSeek Responses API 的内置 web_search 工具。"""
+"""基于 LLM 知识的信息检索工具（通过 ChatAnywhere 网关调用）。
+
+注意：本工具并非真正的联网搜索，而是调用标准 OpenAI 兼容的
+chat/completions 接口，由 LLM 基于自身训练数据生成回答。
+如需真实的实时联网搜索能力，需要接入专门的搜索 API（如 Tavily、Serper）
+或支持 web_search 工具的模型。
+"""
 
 import httpx
 from langchain_core.tools import tool
@@ -9,54 +15,62 @@ from ..log_utils import agent_logger
 
 @tool
 def web_search(query: str) -> str:
-    """搜索互联网获取实时信息。
+    """基于 LLM 知识库回答用户查询（非实时联网搜索）。
 
     Args:
-        query: 搜索查询内容，例如"摩托车火花塞市场价格趋势 2026"
+        query: 查询内容，例如"摩托车火花塞市场价格趋势 2026"
 
     Returns:
-        搜索结果摘要文本.
+        LLM 生成的信息摘要文本。
     """
-    # 主 Agent、grader 和联网搜索统一使用 DeepSeek key。
-    api_key = get_env("DEEPSEEK_API_KEY", "")
+    # 主 Agent、grader 和本工具统一使用 ChatAnywhere key。
+    api_key = get_env("CHATANYWHERE_API_KEY", "")
     if not api_key:
-        return "错误: 未配置 DEEPSEEK_API_KEY，无法执行网络搜索"
+        return "错误: 未配置 CHATANYWHERE_API_KEY，无法执行搜索"
+
+    base_url = get_env(
+        "LLM_BASE_URL", "https://api.chatanywhere.tech/v1"
+    ).rstrip("/")
+    # 本工具走标准 chat/completions 接口（非搜索专用接口），
+    # 但允许单独指定模型，避免复用主对话的 LLM_MODEL 配置。
+    model = get_env("WEB_SEARCH_MODEL", get_env("LLM_MODEL", "gpt-4o-mini"))
 
     try:
-        # DeepSeek Responses API 的 web_search 是服务端执行的内置工具，
-        # 不需要再配置 DashScope/Tavily 等第二个搜索 Key。
         response = httpx.post(
-            get_env(
-                "DEEPSEEK_RESPONSES_URL",
-                "https://api.deepseek.com/responses",
-            ),
+            f"{base_url}/chat/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json={
-                # 搜索接口只接受 DeepSeek 搜索模型；不要复用可能仍是
-                # qwen3.8-27b 等旧配置的 LLM_MODEL。
-                "model": get_env("WEB_SEARCH_MODEL", "deepseek-flash"),
-                "instructions": (
-                    "你是一个联网搜索助手。请使用 web_search 获取最新、可靠的信息，"
-                    "用中文总结结果；如果搜索结果不足或无法确认，请明确说明。"
-                ),
-                "input": query,
-                "tools": [{"type": "web_search"}],
-                # web_search 工具被显式要求调用，避免模型只凭训练记忆回答。
-                "tool_choice": {"type": "web_search"},
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是一个信息检索助手。请基于你的知识，"
+                            "针对用户的查询提供简洁、准确的信息摘要。"
+                            "如果某些信息可能已过时、无法确认或不在你的知识范围内，"
+                            "请明确说明，切勿编造。"
+                        ),
+                    },
+                    {"role": "user", "content": query},
+                ],
                 "temperature": 0.3,
-                "max_output_tokens": 2000,
+                "max_tokens": 2000,
             },
             timeout=30,
         )
 
         if response.status_code == 200:
             result = response.json()
-            content = _extract_response_text(result)
+            content = (
+                result.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+            )
             if not content:
-                return "搜索成功，但 DeepSeek 没有返回可读摘要"
+                return "搜索成功，但模型没有返回可读内容"
             agent_logger.info(f"Web search completed for: {query[:50]}")
             return content
         else:
@@ -73,27 +87,3 @@ def web_search(query: str) -> str:
     except Exception as e:
         agent_logger.error(f"Web search error: {e}")
         return f"搜索异常: {str(e)}"
-
-
-def _extract_response_text(payload: dict) -> str:
-    """兼容 Responses API 的 output_text 及原始 output 两种返回形态。"""
-    output_text = payload.get("output_text")
-    if isinstance(output_text, str) and output_text.strip():
-        return output_text.strip()
-
-    chunks: list[str] = []
-    for item in payload.get("output", []) or []:
-        if not isinstance(item, dict) or item.get("type") != "message":
-            continue
-        content = item.get("content", [])
-        if isinstance(content, str):
-            chunks.append(content)
-            continue
-        for block in content or []:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") in {"output_text", "text"}:
-                text = block.get("text")
-                if isinstance(text, str) and text.strip():
-                    chunks.append(text.strip())
-    return "\n".join(chunks).strip()

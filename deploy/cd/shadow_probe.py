@@ -122,7 +122,7 @@ def llm_probe():
     from src.agent.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL  # noqa: PLC0415
 
     if not LLM_API_KEY:
-        return False, "DEEPSEEK_API_KEY 为空"
+        return False, "CHATANYWHERE_API_KEY 为空"
     url = LLM_BASE_URL.rstrip("/") + "/chat/completions"
     payload = json.dumps({
         "model": LLM_MODEL,
