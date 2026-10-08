@@ -25,11 +25,11 @@
 
 LLM 切换至 ChatAnywhere 网关，落地「本地直推生产」的日常发布链路，并修掉两处真机问题：沙箱项目上传被本地 Mongo 数据目录卡死、`/api` 请求在容器里被 Next.js 代理截走。
 
-- **直推发布（日常迭代）**：配置与用法见下文「[直推发布（日常迭代）](#直推发布日常迭代)」。本次补齐该链路的三个文件：[scripts/push-prod.ps1](scripts/push-prod.ps1) / [scripts/push-prod.sh](scripts/push-prod.sh)（本地入口：断言工作区干净 → ruff + compileall + pytest 快速检查 → push GitHub 保持真相源 → push 服务器裸仓库）、[deploy/cloud/post-receive.hook](deploy/cloud/post-receive.hook)（只认 `refs/heads/main`，其余分支与 tag 仅存裸仓库不部署）、[deploy/cd/push-deploy.sh](deploy/cd/push-deploy.sh)（编排：构建 clone 里 checkout 刚推的 sha → `build.sh` 构建镜像 → `deploy.sh deploy production` 完整发布链）。三个实现细节值得记：① post-receive 环境里 `GIT_DIR=.` 指向裸仓库，不 `unset` 会劫持所有子进程的 `git -C`——「在构建 clone 里 checkout」变成「在裸仓库上 checkout」，报错很绕；② 直推与换版是**两把锁**：push-deploy 用 `/var/lock` 锁防两次 push 撞同一个构建 clone，换版互斥仍由 `deploy.sh` 自己的锁管；③ `build.sh` 要求版本参数是「本地存在且指向 HEAD」的 tag（它拿 `${VERSION}^` 算上一个 `v*` tag 得变更集），用只在构建 clone 里存在的移动 tag `push-head` 满足它，镜像打 `push-head` 与 `sha-<12>` 双 tag，发布只认不可变的后者。
+- **直推发布（日常迭代）**：配置与用法见下文「[直推发布（日常迭代）](#直推发布日常迭代)」。本次补齐该链路的三个文件（**均不入库**，由本地与部署机各持一份）：`scripts/push-prod.ps1` / `scripts/push-prod.sh`（本地入口：断言工作区干净 → ruff + compileall + pytest 快速检查 → push GitHub 保持真相源 → push 服务器裸仓库）、`deploy/cloud/post-receive.hook`（只认 `refs/heads/main`，其余分支与 tag 仅存裸仓库不部署）、`deploy/cd/push-deploy.sh`（编排：构建 clone 里 checkout 刚推的 sha → `build.sh` 构建镜像 → `deploy.sh deploy production` 完整发布链）。三个实现细节值得记：① post-receive 环境里 `GIT_DIR=.` 指向裸仓库，不 `unset` 会劫持所有子进程的 `git -C`——「在构建 clone 里 checkout」变成「在裸仓库上 checkout」，报错很绕；② 直推与换版是**两把锁**：push-deploy 用 `/var/lock` 锁防两次 push 撞同一个构建 clone，换版互斥仍由 `deploy.sh` 自己的锁管；③ `build.sh` 要求版本参数是「本地存在且指向 HEAD」的 tag（它拿 `${VERSION}^` 算上一个 `v*` tag 得变更集），用只在构建 clone 里存在的移动 tag `push-head` 满足它，镜像打 `push-head` 与 `sha-<12>` 双 tag，发布只认不可变的后者。
 - **LLM 切换至 ChatAnywhere**：DeepSeek → ChatAnywhere（OpenAI 兼容网关），主对话、grader、联网搜索共用 `CHATANYWHERE_API_KEY`（[config.py](src/agent/config.py)），`.env.example` 与 `deploy/.env.example` 同步换模板变量。顺带修正 [web_search.py](src/agent/tools/web_search.py) 的注释与测试：该工具是**基于 LLM 知识的回答，不是真实联网搜索**，避免能力被误判。
 - **沙箱项目上传被本地 Mongo 数据目录卡死**：启动时 `_upload_project_to_sandbox` 把整棵项目树打包传进沙箱，本地开发数据目录 `.mongo-data` / `.mongo-log`（含被 mongod 进程锁定的 `.lock` 文件）不可读，`tar.add` 抛 PermissionError 直接中断上传。修复两层：排除清单加入这两个目录；单个文件不可读改为跳过并记 warning，不再让一个 `.lock` 文件拖垮整个上传（[main_agent.py](src/agent/main_agent.py)）。
 - **`/api` 代理只在开发模式生效**：[next.config.ts](frontend/next.config.ts) 的 `/api → localhost:8000` rewrite 是给 `npm run dev` 用的，但它在 Docker 容器里同样生效——请求被 Next 接住、转发到容器内并不存在的 localhost:8000。改为仅 `NODE_ENV === "development"` 返回 rewrite，生产统一由 nginx 反代。
-- **文档脱敏**：README 与 push-prod 脚本注释里的真实服务器 IP 换成 `<部署机IP>` 占位（仓库是 public，规则见「提交前检查」），`.gitignore` 补上 `.trae/`（IDE 本地目录）。
+- **文档脱敏**：README 与 push-prod 脚本注释里的真实服务器 IP 换成 `<部署机IP>` 占位（仓库是 public，规则见「提交前检查」）；`.gitignore` 补上 `.trae/`（IDE 本地目录）与直推脚本（`scripts/`、`deploy/cd/push-deploy.sh`、`deploy/cloud/post-receive.hook`，不入库但本地与部署机各留一份）。
 
 ## 2026-10-06 更新
 
@@ -505,6 +505,11 @@ CHATANYWHERE_API_KEY=sk-xxxx bash deploy/cloud/bootstrap.sh <服务器IP>   # �
 tag 发布流水线（release-please → build.yml → deploy.yml 人工审批）之外，还有一条
 **本地直推**路径用于日常迭代：一条命令把当前分支发上生产，运行时安全链
 （备份/迁移/影子/观察窗/自动回滚）与正式发布完全相同，只是免去了 PR 与人工审批。
+
+> 该链路的三个脚本（`scripts/push-prod.ps1|.sh`、`deploy/cloud/post-receive.hook`、
+> `deploy/cd/push-deploy.sh`）**不入库**，由本地与部署机各自维护。注意部署机生产树
+> 由 `git archive` + rsync 同步：deploy 侧两个脚本必须放在**同步范围之外**（如
+> `/etc/erp-agent/`，hook 里用 `PUSH_DEPLOY_SCRIPT` 指过去），否则会被 `rsync --delete` 清掉。
 
 ```powershell
 # 本地（Windows；Git Bash 用 scripts/push-prod.sh）

@@ -67,6 +67,13 @@ deploy/nginx.env
 # ============ 日志 ============
 *.log
 
+# ============ 本地运维脚本（不入库） ============
+# 直推发布链路的本地脚本：含部署机路径等运维细节，不进 public 仓库。
+# 本地与部署机各持一份；部署机侧放在 rsync 同步范围之外（见 README「直推发布」）。
+/scripts/
+/deploy/cd/push-deploy.sh
+/deploy/cloud/post-receive.hook
+
 # ============ IDE / 系统 ============
 .vscode/
 .idea/
