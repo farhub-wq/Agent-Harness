@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.4](https://github.com/farhub-wq/Agent-Harness/compare/v1.0.3...v1.0.4) (2026-10-08)
+
+
+### 修复
+
+* 触发发布（LLM切换至ChatAnywhere + 沙箱上传修复） ([f6e5d72](https://github.com/farhub-wq/Agent-Harness/commit/f6e5d725af3c0c72544cc29d6223909def929eb9))
+
 ## [1.0.3](https://github.com/farhub-wq/Agent-Harness/compare/v1.0.2...v1.0.3) (2026-10-06)
 
 
