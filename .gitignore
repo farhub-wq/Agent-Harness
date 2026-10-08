@@ -70,5 +70,6 @@ deploy/nginx.env
 # ============ IDE / 系统 ============
 .vscode/
 .idea/
+.trae/
 .DS_Store
 Thumbs.db
