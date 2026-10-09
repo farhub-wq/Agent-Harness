@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/farhub-wq/Agent-Harness/compare/v1.1.0...v1.1.1) (2026-10-09)
+
+
+### 修复
+
+* 修复 request_order_info 中断不到达前端，表单流程首次打通 ([0d113da](https://github.com/farhub-wq/Agent-Harness/commit/0d113daf381c4ae6fbd8cf36251727b008cc16ca))
+
 ## [1.1.0](https://github.com/farhub-wq/Agent-Harness/compare/v1.0.5...v1.1.0) (2026-10-09)
 
 
