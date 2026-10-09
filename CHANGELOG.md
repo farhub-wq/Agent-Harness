@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/farhub-wq/Agent-Harness/compare/v1.0.5...v1.1.0) (2026-10-09)
+
+
+### 新功能
+
+* 沙箱镜像预装数据分析栈与中文字体，消除图表生成冷装等待 ([d0dd74c](https://github.com/farhub-wq/Agent-Harness/commit/d0dd74c97d9274b597bc31547a512e369d635b3f))
+
 ## [1.0.5](https://github.com/farhub-wq/Agent-Harness/compare/v1.0.4...v1.0.5) (2026-10-08)
 
 
