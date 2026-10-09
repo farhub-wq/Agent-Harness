@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.5](https://github.com/farhub-wq/Agent-Harness/compare/v1.0.4...v1.0.5) (2026-10-08)
+
+
+### 文档
+
+* 更新 README 记录 2026-10-08 更新，补直推发布脚本并脱敏 ([fc3ffbe](https://github.com/farhub-wq/Agent-Harness/commit/fc3ffbe9aaa7ce64913a155be7f81dd8f3c8c43d))
+* 直推脚本相关 README 引用改为不入库说明，gitignore 挡住本地脚本 ([7e85d01](https://github.com/farhub-wq/Agent-Harness/commit/7e85d01c001eb4aaf649ef650888f60316295482))
+
 ## [1.0.4](https://github.com/farhub-wq/Agent-Harness/compare/v1.0.3...v1.0.4) (2026-10-08)
 
 
