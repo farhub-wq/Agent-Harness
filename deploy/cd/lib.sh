@@ -723,10 +723,15 @@ cd_shadow_sandbox() {
 
     # 起一个临时 dind：用独立 network，不接 mcp-sandbox。
     # --privileged 是 dind 的硬需求，与生产 dind 一致。
+    # daemon.json / seccomp.json 与生产 dind 挂同一份：前者带 daocloud 镜像源
+    #（生产机直连 Docker Hub 不通，基础镜像 FROM python:3.11-slim 的拉取靠它），
+    # 后者是 daemon.json 里 seccomp-profile 指向的文件，缺了 dockerd 起不来。
     if ! docker run -d --name "$dind_name" \
             --privileged \
             --network "$net" \
             -e DOCKER_TLS_CERTDIR="" \
+            -v "$CD_REPO_ROOT/deploy/dind-daemon.json":/etc/docker/daemon.json:ro \
+            -v "$CD_REPO_ROOT/deploy/dind-seccomp.json":/etc/docker/seccomp.json:ro \
             -v /tmp:/tmp:ro \
             docker:27-dind \
             --storage-driver=overlay2 --mtu=1400 >/dev/null 2>&1; then
@@ -736,6 +741,8 @@ cd_shadow_sandbox() {
                 --privileged \
                 --network "$net" \
                 -e DOCKER_TLS_CERTDIR="" \
+                -v "$CD_REPO_ROOT/deploy/dind-daemon.json":/etc/docker/daemon.json:ro \
+                -v "$CD_REPO_ROOT/deploy/dind-seccomp.json":/etc/docker/seccomp.json:ro \
                 -v /tmp:/tmp:ro \
                 docker:27-dind \
                 --storage-driver=overlay2 --mtu=1400 >/dev/null 2>&1; then
@@ -769,12 +776,27 @@ cd_shadow_sandbox() {
     sandbox_img="$(sed -n 's/^SANDBOX_IMAGE=//p' "$CD_REPO_ROOT/deploy/.env" 2>/dev/null | head -1 | tr -d '"'"'"'')"
     sandbox_img="${sandbox_img:-python:3.11-slim}"
 
-    info "影子沙箱：pull $sandbox_img"
-    if ! docker exec "$dind_name" docker pull "$sandbox_img" >/dev/null 2>&1; then
-        warn "影子沙箱：pull $sandbox_img 失败（dind 出网有问题？）"
-        docker rm -f "$dind_name" >/dev/null 2>&1 || true
-        docker network rm "$net" >/dev/null 2>&1 || true
-        return 1
+    # 镜像获取方式与 compose 的 sandbox-image-loader 对齐：仓库里有
+    # deploy/sandbox/Dockerfile 就在临时 dind 里现构建（erp-sandbox 这类
+    # 预装镜像不存在于任何 registry，pull 必然失败）；没有才退回 docker pull。
+    if [ -f "$CD_REPO_ROOT/deploy/sandbox/Dockerfile" ]; then
+        info "影子沙箱：build $sandbox_img（deploy/sandbox/Dockerfile）"
+        docker exec "$dind_name" mkdir -p /build >/dev/null 2>&1 || true
+        if ! docker cp "$CD_REPO_ROOT/deploy/sandbox/." "$dind_name":/build \
+            || ! docker exec "$dind_name" docker build -t "$sandbox_img" /build >/dev/null 2>&1; then
+            warn "影子沙箱：build $sandbox_img 失败（dind 出网 / PyPI 镜像源有问题？）"
+            docker rm -f "$dind_name" >/dev/null 2>&1 || true
+            docker network rm "$net" >/dev/null 2>&1 || true
+            return 1
+        fi
+    else
+        info "影子沙箱：pull $sandbox_img"
+        if ! docker exec "$dind_name" docker pull "$sandbox_img" >/dev/null 2>&1; then
+            warn "影子沙箱：pull $sandbox_img 失败（dind 出网有问题？）"
+            docker rm -f "$dind_name" >/dev/null 2>&1 || true
+            docker network rm "$net" >/dev/null 2>&1 || true
+            return 1
+        fi
     fi
 
     # 起一个沙箱容器并执行代码：echo + python 一行。两个断言：

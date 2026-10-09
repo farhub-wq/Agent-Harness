@@ -397,8 +397,18 @@ def _init_python_runtime(sandbox: CustomOpenSandbox):
     else:
         sandbox_logger.warning("Python not available in sandbox")
 
-    # 安装常用数据分析包。实测冷装 matplotlib+pandas+numpy 要 2 分 24 秒
-    # （网络波动下更久），所以显式给一个宽裕的超时，别落到 120s 默认值上。
+    # 预装镜像（erp-sandbox:3.11，见 deploy/sandbox/Dockerfile）已自带这三个包；
+    # 只有裸 python:3.11-slim 才需要现装（实测冷装 matplotlib+pandas+numpy 要
+    # 2 分 24 秒，网络波动下更久）。先探测再装，别让每次冷建容器都白等一遍。
+    check = sandbox.execute(
+        "python3 -c 'import matplotlib, pandas, numpy' "
+        "2>/dev/null && echo INSTALLED || echo MISSING",
+        timeout=30,
+    )
+    if "INSTALLED" in check.output:
+        sandbox_logger.info("Python packages already present (prebuilt sandbox image)")
+        return
+
     resp = sandbox.execute(
         f"mkdir -p {SANDBOX_PACKAGE_DIR} && "
         f"python3 -m pip install --no-cache-dir --target {SANDBOX_PACKAGE_DIR} "
@@ -407,6 +417,11 @@ def _init_python_runtime(sandbox: CustomOpenSandbox):
     )
     if resp.exit_code == 0:
         sandbox_logger.info("Python packages installed: matplotlib, pandas, numpy")
+    else:
+        sandbox_logger.warning(
+            f"Python packages install failed (exit {resp.exit_code}): "
+            f"{resp.output[:200]}. Chart generation will need on-demand install."
+        )
 
 
 def _init_go_runtime(sandbox: CustomOpenSandbox):

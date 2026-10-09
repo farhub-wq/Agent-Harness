@@ -114,7 +114,10 @@ INTERNAL_AUTH_TOKEN = get_env("INTERNAL_AUTH_TOKEN", "").strip()
 INTERNAL_AUTH_HEADER = get_env("INTERNAL_AUTH_HEADER", "X-Internal-Auth")
 
 # ============ 沙箱配置 ============
-SANDBOX_IMAGE = get_env("SANDBOX_IMAGE", "python:3.11-slim")#Docker 镜像名称，具体是 Python 3.11 的 slim（精简）版本
+# 沙箱镜像。容器化部署默认 erp-sandbox:3.11（由 compose 的 sandbox-image-loader
+# 用 deploy/sandbox/Dockerfile 在 dind 里构建，预装 matplotlib/pandas/numpy 与
+# 中文字体）；本地开发未构建该镜像时保持 python:3.11-slim，依赖退回运行时按需安装
+SANDBOX_IMAGE = get_env("SANDBOX_IMAGE", "python:3.11-slim")
 SANDBOX_WORK_DIR = "/workspace"
 SANDBOX_SKILLS_DIR = "/skills"
 SANDBOX_MEMORIES_DIR = "/memories"

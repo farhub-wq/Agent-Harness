@@ -90,8 +90,13 @@ services:
       retries: 24
       start_period: 40s
 
-  # 把沙箱基础镜像预先灌进 dind。
-  # 不这么做的话，首次 containers.run 里会夹一次 >60s 的镜像 pull。
+  # 把沙箱镜像构建进 dind。
+  # 以前是 docker pull 官方 python:3.11-slim，依赖得在沙箱里运行时现装
+  # （冷装 matplotlib/numpy 要 1~2 分钟，还依赖 dind 的 PyPI 出口）。现在改为
+  # 用 deploy/sandbox/Dockerfile 现构建：数据分析栈 + 中文字体直接烘进镜像。
+  # 构建上下文挂进 cli 容器，build 请求经 docker API 发给 dind daemon 执行，
+  # 基础镜像 FROM python:3.11-slim 走 dind 的 daocloud 镜像源拉取。
+  # 产物 tag 取 SANDBOX_IMAGE（deploy/.env），backend 用同一个值 —— 改一处即可。
   sandbox-image-loader:
     image: docker:28-cli
     <<: *logging
@@ -100,7 +105,9 @@ services:
     env_file: [./deploy/.env]
     environment:
       DOCKER_HOST: tcp://dind:2375
-    command: ["sh", "-c", "echo \"pulling $$SANDBOX_IMAGE\" && docker pull $$SANDBOX_IMAGE"]
+    volumes:
+      - ./deploy/sandbox:/build:ro
+    command: ["sh", "-c", "echo \"building $$SANDBOX_IMAGE\" && docker build -t \"$$SANDBOX_IMAGE\" /build"]
     networks: [sandbox]
     depends_on:
       dind: { condition: service_healthy }

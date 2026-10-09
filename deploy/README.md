@@ -207,7 +207,7 @@ Agent 侧怎么知道能用：`src/agent/memory/AGENTS.md` 里让它先跑 `os.g
 
 三处漏掉任意一处，CI 的 `test_static_config.py` 会直接红，并在报错里指出是哪两处对不上 —— 这条以前只是文档，文档拦不住人。顺带那条断言还会检查这个 IP 落在 `mcp-sandbox` 的 `subnet` 内，以及整份 compose 里只有一处 `ipv4_address`。
 
-**沙箱镜像里没预装 MCP 客户端**，脚本需要自己 `pip install mcp`（装进 `/workspace/python-packages`）。这会让每次沙箱冷启动多一次几十秒的安装。要消掉就自己烘一个装了 `mcp` 的沙箱镜像，把 `SANDBOX_IMAGE` 指过去。
+**沙箱镜像里没预装 MCP 客户端**，脚本需要自己 `pip install mcp`（装进 `/workspace/python-packages`）。这会让每次沙箱冷启动多一次几十秒的安装。要消掉就往 `deploy/sandbox/Dockerfile` 里加一行 `pip install mcp`，`sandbox-image-loader` 下次起栈时会重新构建。
 
 ### 其它
 
@@ -223,7 +223,7 @@ Agent 侧怎么知道能用：`src/agent/memory/AGENTS.md` 里让它先跑 `os.g
 
 **图表功能时好时坏**
 
-沙箱内 `chart_generator` 会运行时 `pip install matplotlib numpy`，写进 `/workspace`（tmpfs）。确认 dind 能出网，或预先烘一个装了这些包的沙箱镜像并把 `SANDBOX_IMAGE` 指过去。
+容器化部署的沙箱镜像（`deploy/sandbox/Dockerfile`，tag 由 `SANDBOX_IMAGE` 决定）已预装 matplotlib/pandas/numpy，`chart_generator` 检测到可导入就直接用。若沙箱镜像退回了裸 `python:3.11-slim`（比如本地开发没构建预装镜像），才会运行时 `pip install`——这时确认 dind 能出网（或配置 PyPI 镜像源）。
 
 **重启后 dind 里堆了一批 `erp-sandbox-warm-*`**
 

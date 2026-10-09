@@ -38,12 +38,15 @@ import json
 import sys
 import os
 
-for font in ['SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', 'DejaVu Sans']:
-    try:
+# 字体不能像以前那样 try 赋值选第一个 —— rcParams 赋值永远不会抛异常，
+# 那个循环恒选 SimHei；SimHei 在 Linux 沙箱镜像里不存在，绘制时静默回退
+# DejaVu，中文全部渲染成方框。这里改成按 fontManager 里实际可用的选。
+from matplotlib import font_manager
+_available = {f.name for f in font_manager.fontManager.ttflist}
+for font in ['Microsoft YaHei', 'SimHei', 'WenQuanYi Micro Hei', 'Noto Sans CJK SC', 'DejaVu Sans']:
+    if font in _available:
         plt.rcParams['font.sans-serif'] = [font]
         break
-    except:
-        continue
 plt.rcParams['axes.unicode_minus'] = False
 
 params_path = sys.argv[1]
@@ -283,9 +286,24 @@ def generate_chart(
         sandbox.write_file(params_path, json.dumps(params, ensure_ascii=False))
         sandbox.write_file(script_path, CHART_SCRIPT)
 
-        # 安装依赖（仅首次，后续复用缓存）
-        # 冷装 matplotlib+numpy 实测要 1 分钟以上（PIP_TARGET 指向 volume，首装无缓存）
-        sandbox.execute("pip install -q matplotlib numpy 2>/dev/null || true", timeout=300)
+        # 检查 matplotlib/numpy 是否已安装（预热阶段或上次调用已装则跳过）
+        check = sandbox.execute(
+            "python -c 'import matplotlib, numpy' 2>/dev/null && echo INSTALLED || echo MISSING",
+            timeout=15,
+        )
+        if "MISSING" in check.output:
+            # 冷装 matplotlib+numpy 实测要 1 分钟以上（PIP_TARGET 指向 volume，首装无缓存）
+            install = sandbox.execute(
+                "pip install -q matplotlib numpy 2>&1 | tail -3",
+                timeout=600,
+            )
+            if install.exit_code != 0:
+                return (
+                    f"图表生成失败: matplotlib/numpy 安装超时或失败（exit {install.exit_code}）。\n"
+                    f"这通常是沙箱到 PyPI 的网络出口慢或不通。\n"
+                    f"pip 输出: {install.output[:200] if install.output else '(无)'}\n"
+                    f"建议: 检查生产机 Docker 网络出口，或预装 matplotlib/numpy 到沙箱镜像。"
+                )
 
         # 在沙箱内执行图表生成
         result = sandbox.execute(f"python {script_path} {params_path}", timeout=120)
