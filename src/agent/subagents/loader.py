@@ -151,6 +151,30 @@ def _parse_interrupt_on(config: dict) -> dict | None:
     return parsed
 
 
+def collect_interrupt_on(configs: list[dict]) -> dict:
+    """聚合所有子Agent配置中的 interrupt_on，供主Agent级 HITL 中间件使用。
+
+    写工具（order_create 等）直接挂在主 Agent 上，任务未必会委派给子Agent，
+    因此只在子Agent规格里声明 interrupt_on 不会生效——必须在主Agent的
+    HumanInTheLoopMiddleware 上注册同一份审批策略。
+
+    同名工具出现在多个配置中时以后者为准（配置按文件名排序加载）。
+    """
+    merged: dict = {}
+    for config in configs:
+        parsed = _parse_interrupt_on(config)
+        if not parsed:
+            continue
+        for tool_name, tool_config in parsed.items():
+            if tool_name in merged and merged[tool_name] != tool_config:
+                agent_logger.warning(
+                    f"Duplicate interrupt_on config for '{tool_name}' in "
+                    f"{config.get('name')}: overriding previous policy"
+                )
+            merged[tool_name] = tool_config
+    return merged
+
+
 def load_subagent_configs() -> list[dict]:
     """读取 configs/*.yaml，校验必填字段
     

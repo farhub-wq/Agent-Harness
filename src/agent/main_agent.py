@@ -11,6 +11,7 @@ from typing import Optional
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, LocalShellBackend, StoreBackend
 from langchain.agents.middleware import (
+    HumanInTheLoopMiddleware,
     ModelCallLimitMiddleware,
     ToolCallLimitMiddleware,
 )
@@ -371,12 +372,16 @@ def create_main_agent(
 
     # ===== 4. 加载子Agent配置 =====
     from .subagents.loader import (
+        collect_interrupt_on,
         get_delegation_context_prompt,
         load_subagent_configs,
         resolve_subagent_tools,
     )
     subagent_configs = load_subagent_configs()
     subagents = resolve_subagent_tools(subagent_configs, all_tools)
+    # 写工具挂在主 Agent 上，审批策略必须在主 Agent 级 HITL 注册，
+    # 否则 order_create 等调用会直接执行、绕过人工审批（yaml 声明此前未接线）。
+    interrupt_on = collect_interrupt_on(subagent_configs)
     # 生成委派上下文协议（注入主 Agent 提示词）
     delegation_prompt = get_delegation_context_prompt(subagent_configs)
 
@@ -458,6 +463,9 @@ def create_main_agent(
             prepare_messages_for_grader=build_grader_messages,
         ),
         ReviewExecutionGate(_harness_config),  # after_agent 逆序：先升级，再审查
+        # --- 人工审批：写工具执行前中断（resume 协议 {decisions:[{type:"approve"|"reject"}]}）---
+        # 必须真正注册才会拦截；仅在 procurement_order.yaml 声明不会生效。
+        *([HumanInTheLoopMiddleware(interrupt_on=interrupt_on)] if interrupt_on else []),
         # --- 框架内置中间件（调用限制）---
         ModelCallLimitMiddleware(run_limit=MAX_MODEL_CALLS),          # 模型调用上限
         ToolCallLimitMiddleware(run_limit=MAX_TOOL_CALLS),            # 工具调用上限

@@ -173,11 +173,20 @@ async def stream_chat_response(
                                         "extracted_data": interrupt_value.get("current_data", {}),
                                     })
                                 elif "action_requests" in interrupt_value:
+                                    # langchain HumanInTheLoopMiddleware 的载荷：
+                                    # {"action_requests": [{"name","args","description"}], ...}
+                                    requests_list = interrupt_value.get("action_requests", [])
+                                    tool_names = [r.get("name", "") for r in requests_list if isinstance(r, dict)]
+                                    # 审批卡片按订单字段渲染：合并各请求的 args
+                                    order_args = {}
+                                    for req in requests_list:
+                                        if isinstance(req, dict) and isinstance(req.get("args"), dict):
+                                            order_args.update(req["args"])
                                     yield sse_event("interrupt", {
                                         "interrupt_type": "hitl_approval",
-                                        "tool_name": interrupt_value.get("tool_name", ""),
-                                        "tool_args": interrupt_value.get("action_requests", {}),
-                                        "order_data": interrupt_value.get("action_requests", {}),
+                                        "tool_name": ", ".join(n for n in tool_names if n),
+                                        "tool_args": order_args,
+                                        "order_data": order_args,
                                     })
                                 else:
                                     # 通用中断（interrupt_on 触发的审批）

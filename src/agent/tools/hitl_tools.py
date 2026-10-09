@@ -4,43 +4,50 @@ request_order_info - 当订单必填字段缺失时，向用户请求补充信�
 """
 import json
 import re
+import secrets
+from datetime import datetime
 
 from langchain_core.tools import tool
 from langgraph.types import interrupt
 
 from ..log_utils import agent_logger
 
-# 订单必填字段
-# 定义订单必填字段列表
-# 这些字段在创建或更新订单时必须提供，否则数据不完整
-# orderNumber: 订单编号（唯一标识）
-# orderDetail: 订单明细列表（包含具体商品信息）
-ORDER_REQUIRED_FIELDS = ["orderNumber", "orderDetail"]
-
-# 定义订单明细必填字段列表
-# 每个订单明细项必须包含以下三个字段
-# partId: 商品/零件ID（标识具体商品）
-# quantity: 订购数量（必须是正数）
-# unitPrice: 商品单价（必须是正数）
+# orderNumber 是系统生成字段（PO+年月日+3位序号，用户未指定时自动生成，
+# ERP 后端也会兜底生成），绝不向用户追问；这里只保留明细必填校验。
 ORDER_DETAIL_REQUIRED_FIELDS = ["partId", "quantity", "unitPrice"]
 
 
+def _generate_order_number() -> str:
+    """生成订单编号 PO + 年月日 + 3位随机序号。"""
+    return f"PO{datetime.now().strftime('%Y%m%d')}{secrets.randbelow(900) + 100}"
+
+
 def validate_order_data(data: dict) -> list:
-    """校验订单数据，返回缺失字段列表"""
+    """校验需用户补充的订单数据，返回缺失字段列表（不含系统生成的 orderNumber）"""
     missing = []
-    for field in ORDER_REQUIRED_FIELDS:
-        if field not in data or data[field] is None:
-            missing.append(field)
 
     if "orderDetail" in data and data["orderDetail"]:
         for i, detail in enumerate(data["orderDetail"]):
             for field in ORDER_DETAIL_REQUIRED_FIELDS:
                 if field not in detail or detail[field] is None:
                     missing.append(f"orderDetail[{i}].{field}")
-    elif "orderDetail" not in missing:
+    else:
         missing.append("orderDetail (至少需要一条明细)")
 
     return missing
+
+def _first_detail(result: dict) -> dict:
+    """返回（必要时创建）orderDetail 的第一条明细。
+
+    extracted_data 里可能带的是空列表 orderDetail: []，此时 setdefault 不会
+    补默认值，直接 [0] 会 IndexError，必须显式判空。
+    """
+    details = result.get("orderDetail")
+    if not isinstance(details, list) or not details:
+        details = [{}]
+        result["orderDetail"] = details
+    return details[0]
+
 
 def parse_supplement_text(text: str, current_data: dict) -> dict:
     """解析用户补充的自由文本，提取结构化数据
@@ -107,7 +114,7 @@ def parse_supplement_text(text: str, current_data: dict) -> dict:
         # ["partId"] = int(...) 设置 partId 字段，并转为整数
         # 
         # 这样做的目的是：如果 orderDetail 还不存在，自动创建它
-        result.setdefault("orderDetail", [{}])[0]["partId"] = int(part_id_match.group(1))
+        _first_detail(result)["partId"] = int(part_id_match.group(1))
     
     # ----- 3.2 提取 quantity（数量） -----
     # 正则表达式: r'(?:quantity|数量)[=:\s]*(\d+)'
@@ -126,7 +133,7 @@ def parse_supplement_text(text: str, current_data: dict) -> dict:
     if qty_match:
         # 将提取的数量添加到订单明细的第一项
         # 同样，如果 orderDetail 不存在则自动创建
-        result.setdefault("orderDetail", [{}])[0]["quantity"] = int(qty_match.group(1))
+        _first_detail(result)["quantity"] = int(qty_match.group(1))
     
     # ----- 3.3 提取 unitPrice（单价） -----
     # 正则表达式: r'(?:unitPrice|单价)[=:\s]*([\d.]+)'
@@ -148,7 +155,7 @@ def parse_supplement_text(text: str, current_data: dict) -> dict:
     
     if price_match:
         # 将提取的单价添加到订单明细的第一项，转为浮点数
-        result.setdefault("orderDetail", [{}])[0]["unitPrice"] = float(price_match.group(1))
+        _first_detail(result)["unitPrice"] = float(price_match.group(1))
     
     # ============ 第4步：返回处理后的结果 ============
     # 将合并了提取数据的字典返回给调用者
@@ -156,14 +163,17 @@ def parse_supplement_text(text: str, current_data: dict) -> dict:
 
 @tool
 def request_order_info(extracted_data: str, missing_fields: str) -> str:
-    """当订单必填字段缺失时，向用户请求补充信息。此工具会暂停执行等待用户输入。
+    """当订单明细字段缺失时，向用户请求补充信息。此工具会暂停执行等待用户输入。
+
+    只需用户补充明细（partId/quantity/unitPrice）；订单编号 orderNumber 为系统
+    生成字段，用户未指定时本工具自动按 PO+年月日+序号 生成，绝不向用户追问。
 
     Args:
         extracted_data: 当前已提取的订单数据JSON字符串
-        missing_fields: 缺失字段列表JSON字符串，例如 ["partId", "quantity"]
+        missing_fields: 缺失字段列表JSON字符串，例如 ["orderDetail[0].partId"]
 
     Returns:
-        完整的订单数据JSON（所有必填字段已填充）
+        完整的订单数据JSON（明细齐全，orderNumber 已就绪，可直接用于 order_create）
     """
     try:
         data = json.loads(extracted_data) if isinstance(extracted_data, str) else extracted_data
@@ -177,11 +187,17 @@ def request_order_info(extracted_data: str, missing_fields: str) -> str:
 
     agent_logger.info(f"Requesting order info supplement. Missing: {missing}")
 
+    def _finalize() -> str:
+        # 明细齐全：orderNumber 缺失则系统生成，返回可直接下单的完整数据
+        if not data.get("orderNumber"):
+            data["orderNumber"] = _generate_order_number()
+        return json.dumps(data, ensure_ascii=False, indent=2)
+
     # 循环：校验 → 中断等待补充 → 解析 → 校验 ... 直到完整
     max_rounds = 5
     for round_num in range(max_rounds):
         if not missing:
-            return json.dumps(data, ensure_ascii=False, indent=2)
+            return _finalize()
 
         # 触发中断，等待用户补充
         supplement = interrupt({
@@ -212,4 +228,4 @@ def request_order_info(extracted_data: str, missing_fields: str) -> str:
             "current_data": data,
         }, ensure_ascii=False)
 
-    return json.dumps(data, ensure_ascii=False, indent=2)
+    return _finalize()
