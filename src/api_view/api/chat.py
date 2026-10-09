@@ -154,9 +154,10 @@ async def stream_chat_response(
                                     "todos": plan_items,
                                 })
 
-                    # --- 中断检测 ---
-                    if chunk.get("interrupts"):
-                        for interrupt_item in chunk["interrupts"]:
+                    # --- 中断检测（langgraph>=0.2 中断键名为 __interrupt__，兼容旧键 interrupts）---
+                    interrupt_items = chunk.get("__interrupt__") or chunk.get("interrupts")
+                    if interrupt_items:
+                        for interrupt_item in interrupt_items:
                             interrupt_value = (
                                 interrupt_item.value
                                 if hasattr(interrupt_item, "value")
