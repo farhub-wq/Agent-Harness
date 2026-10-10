@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2](https://github.com/farhub-wq/Agent-Harness/compare/v1.1.1...v1.1.2) (2026-10-09)
+
+
+### 修复
+
+* 接通采购订单人工审批链路，修复补充信息后订单无法创建 ([6326ea9](https://github.com/farhub-wq/Agent-Harness/commit/6326ea9433565e2eb040282e7b230068e0938a36))
+
 ## [1.1.1](https://github.com/farhub-wq/Agent-Harness/compare/v1.1.0...v1.1.1) (2026-10-09)
 
 
